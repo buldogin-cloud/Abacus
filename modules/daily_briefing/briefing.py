@@ -25,8 +25,10 @@ sys.path.insert(0, str(_ROOT))
 
 from integrations.calendar_client import CalendarClient  # noqa: E402
 from integrations.gmail_client import GmailClient  # noqa: E402
+from integrations.drive_client import DriveClient  # noqa: E402
 from modules.researcher.researcher import Researcher  # noqa: E402
 from modules.task_manager.tasks import TaskManager  # noqa: E402
+from modules.daily_briefing.checkpoints_util import CheckpointsReader  # noqa: E402
 
 
 def load_config(path: str | None) -> dict[str, Any]:
@@ -240,19 +242,49 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Щоденний брифінг Command Center")
     parser.add_argument("--config", help="Шлях до config.yaml", default=None)
     parser.add_argument("--stdout", action="store_true", help="Вивести у консоль")
+    parser.add_argument("--no-drive", action="store_true", help="Не зберігати в Google Drive")
     args = parser.parse_args()
 
+    # КРОК 1: Завантажити checkpoints з Google Drive (delta-only mode)
+    print("[→] Завантаження checkpoints з Google Drive...")
+    checkpoints_reader = CheckpointsReader()
+    checkpoints = checkpoints_reader.load_from_drive()
+    
+    if checkpoints:
+        print(f"[✓] Checkpoints завантажено (gmail: {checkpoints.get('gmail_last_success', 'N/A')})")
+    else:
+        print("[!] Checkpoints не завантажені, використовуємо defaults")
+
+    # КРОК 2: Генерувати брифінг
     config = load_config(args.config)
     briefing = build_briefing(config)
 
+    # КРОК 3: Зберегти локально
     output_dir = config.get("general", {}).get("output_dir", "briefings")
     path = save_briefing(briefing, output_dir)
-    print(f"[✓] Брифінг збережено: {path}")
+    print(f"[✓] Брифінг збережено локально: {path}")
+
+    # КРОК 4: Зберегти у Google Drive (daily/)
+    if not args.no_drive:
+        try:
+            print("[→] Збереження брифінгу в Google Drive...")
+            drive = DriveClient()
+            daily_folder_id = '1a0RJCRUXOBHf_75mm7Pu2cBIeKSXG3hN'  # ID папки daily/
+            filename = f"briefing_{datetime.now():%Y-%m-%d}.md"
+            
+            file_id = drive.write_file(briefing, filename, daily_folder_id)
+            
+            if file_id:
+                print(f"[✓] Брифінг збережено в Drive: daily/{filename}")
+            else:
+                print("[!] Не вдалося зберегти в Drive")
+        except Exception as exc:
+            print(f"[!] Помилка збереження в Drive: {exc}")
 
     if args.stdout:
         print("\n" + briefing)
 
-    # Необовʼязкова розсилка брифінгу на пошту.
+    # КРОК 5: Необовʼязкова розсилка брифінгу на пошту
     delivery = config.get("delivery", {})
     if delivery.get("send_email") and delivery.get("email_to"):
         try:
@@ -264,6 +296,8 @@ def main() -> None:
             print(f"[✓] Брифінг надіслано на {delivery['email_to']}")
         except Exception as exc:  # noqa: BLE001
             print(f"[!] Не вдалося надіслати брифінг: {exc}")
+    
+    print("\n[✓] Усі операції завершено")
 
 
 if __name__ == "__main__":
