@@ -2,9 +2,11 @@
 Клієнт Google Drive для читання та запису файлів
 """
 
-from integrations.google_auth import get_service_sso
 import io
+from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
+
+from integrations.google_auth import get_credentials
 
 
 class DriveClient:
@@ -12,10 +14,8 @@ class DriveClient:
     
     def __init__(self):
         """Ініціалізація клієнта Drive"""
-        self.service = get_service_sso('drive', 'v3', [
-            'https://www.googleapis.com/auth/drive.file',
-            'https://www.googleapis.com/auth/drive.readonly'
-        ])
+        creds = get_credentials()
+        self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
     
     def find_file(self, name, parent_id=None, mime_type=None):
         """

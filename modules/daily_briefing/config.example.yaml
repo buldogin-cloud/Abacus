@@ -30,7 +30,7 @@ calendar:
 # --- Google Sheets (реєстр завдань) ---
 tasks:
   # ID таблиці Google Sheets із завданнями (з URL таблиці).
-  spreadsheet_id: "ВАШ_SPREADSHEET_ID"
+  spreadsheet_id: "11oqxqRm7cAH6jpKf9T7CYtIY0j01LAV259F7NGkd5so"
   # Назва аркуша із завданнями.
   sheet_name: "Завдання"
 
