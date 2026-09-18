@@ -1,0 +1,35 @@
+# Секрети та облікові дані
+.env
+config.yaml
+credentials.json
+token.json
+*.token
+client_secret*.json
+service_account*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Артефакти брифінгу
+briefings/
+output/
+*.log
+
+# ОС / редактори
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Автозгенеровані прев'ю документів
+docs/*.pdf
+docs/*.docx

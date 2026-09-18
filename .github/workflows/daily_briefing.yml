@@ -1,0 +1,53 @@
+name: Щоденний брифінг Command Center
+
+# Запуск щодня о 07:00 за Києвом (04:00 UTC) + можливість вручну.
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 04:00 UTC = 07:00 Europe/Kyiv
+  workflow_dispatch:       # ручний запуск із вкладки Actions
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Клонування репозиторію
+        uses: actions/checkout@v4
+
+      - name: Налаштування Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Встановлення залежностей
+        run: pip install -r requirements.txt
+
+      - name: Підготовка облікових даних та конфігурації
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+        run: |
+          # Записуємо секрети у файли (вони не потрапляють у git).
+          if [ -n "$GOOGLE_CREDENTIALS" ]; then
+            printf '%s' "$GOOGLE_CREDENTIALS" > credentials.json
+          fi
+          if [ -n "$GOOGLE_TOKEN" ]; then
+            printf '%s' "$GOOGLE_TOKEN" > token.json
+          fi
+          if [ -n "$CONFIG_YAML" ]; then
+            printf '%s' "$CONFIG_YAML" > config.yaml
+          fi
+
+      - name: Формування щоденного брифінгу
+        run: python modules/daily_briefing/briefing.py
+
+      - name: Збереження брифінгу як артефакту
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-briefing
+          path: briefings/*.md
+          if-no-files-found: warn
+          retention-days: 30
