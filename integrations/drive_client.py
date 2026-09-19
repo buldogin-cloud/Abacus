@@ -123,3 +123,20 @@ class DriveClient:
         except Exception as e:
             print(f"❌ Помилка запису файлу: {e}")
             return None
+
+    def delete_file(self, file_id):
+        """
+        Видалити файл з Drive
+        
+        Args:
+            file_id: ID файлу
+            
+        Returns:
+            True якщо успішно
+        """
+        try:
+            self.service.files().delete(fileId=file_id).execute()
+            return True
+        except Exception as e:
+            print(f"❌ Помилка видалення файлу: {e}")
+            return False

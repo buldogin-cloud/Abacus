@@ -324,7 +324,6 @@ def main() -> None:
         
         if writer.update_checkpoints(sources, status):
             # Логуємо успіх
-            from datetime import datetime
             now = datetime.now()
             event = {
                 'time_utc': now.strftime('%H:%M'),
