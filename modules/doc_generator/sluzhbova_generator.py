@@ -11,10 +11,20 @@
 """
 
 import os
+import sys
 from datetime import datetime
 from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+# Додаємо батьківський шлях для імпортів
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from modules.doc_generator.folder_mapping import (
+    get_folder_id,
+    format_filename,
+    AUTO_PREFIX
+)
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), 'templates')
 
@@ -30,6 +40,60 @@ def _load_letterhead() -> list[str]:
         return [line.rstrip('\n') for line in f if line.strip()]
 
 
+def upload_to_drive(local_path: str, doc_type: str = "sluzhbova_zapyska") -> str | None:
+    """
+    Завантажити документ на Google Drive у відповідну папку
+    
+    Args:
+        local_path: Локальний шлях до .docx файлу
+        doc_type: Тип документа (за замовчуванням "sluzhbova_zapyska")
+        
+    Returns:
+        ID файлу на Drive або None при помилці
+    """
+    try:
+        from integrations.drive_client import DriveClient
+        from googleapiclient.http import MediaFileUpload
+        
+        drive = DriveClient()
+        folder_id = get_folder_id(doc_type)
+        
+        # Отримуємо назву файлу
+        filename = os.path.basename(local_path)
+        
+        # Форматуємо назву з префіксом АВ
+        formatted_filename = format_filename(filename, doc_type)
+        
+        # Метадані файлу
+        file_metadata = {
+            'name': formatted_filename,
+            'parents': [folder_id]
+        }
+        
+        # Завантаження файлу
+        media = MediaFileUpload(
+            local_path,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            resumable=True
+        )
+        
+        file = drive.service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, name, webViewLink'
+        ).execute()
+        
+        print(f"✅ Завантажено на Drive: {formatted_filename}")
+        print(f"   ID: {file.get('id')}")
+        print(f"   URL: {file.get('webViewLink')}")
+        
+        return file.get('id')
+    
+    except Exception as e:
+        print(f"❌ Помилка завантаження на Drive: {e}")
+        return None
+
+
 def generate_sluzhbova(
     addressee: list[str],
     body_paragraphs: list[str],
@@ -37,6 +101,7 @@ def generate_sluzhbova(
     author_position: str = DEFAULT_AUTHOR_POSITION,
     author_name: str = DEFAULT_AUTHOR_NAME,
     output_path: str | None = None,
+    upload_to_drive_flag: bool = False,
 ) -> str:
     """
     Згенерувати службову записку у .docx.
@@ -48,6 +113,7 @@ def generate_sluzhbova(
         author_position: посада автора
         author_name: ПІБ автора
         output_path: куди зберегти (за замовчуванням — briefings/)
+        upload_to_drive_flag: чи завантажувати на Google Drive (за замовчуванням — False)
 
     Returns:
         Шлях до створеного .docx
@@ -117,6 +183,13 @@ def generate_sluzhbova(
         output_path = os.path.join(out_dir, fname)
 
     doc.save(output_path)
+    
+    # --- Завантаження на Drive (якщо потрібно) ---
+    if upload_to_drive_flag:
+        file_id = upload_to_drive(output_path, doc_type="sluzhbova_zapyska")
+        if file_id:
+            print(f"✅ Документ успішно завантажено на Google Drive")
+    
     return output_path
 
 
