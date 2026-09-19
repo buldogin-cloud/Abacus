@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: telegram-webhook
+    env: python
+    region: frankfurt
+    plan: free
+    pythonVersion: 3.11
+    
+    # Команда для запуску
+    startCommand: python modules/telegram_webhook/server.py
+    
+    #環境змінні
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        scope: run
+        value: ${{ env.TELEGRAM_BOT_TOKEN }}
+      - key: PORT
+        scope: run
+        value: 10000
+    
+    # Healthcheck
+    healthCheckPath: /health
+    
+    # Вимоги
+    buildCommand: pip install -r requirements.txt

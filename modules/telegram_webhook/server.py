@@ -63,9 +63,29 @@ def webhook():
             return jsonify({"ok": True})
 
         chat_id = message['chat']['id']
-        text = message.get('text', '').strip()
         user_name = message.get('from', {}).get('first_name', '')
-        logger.info(f"📨 Від {user_name}: {text[:80]}")
+        
+        # Перевіряємо чи це голосове повідомлення
+        if 'voice' in message:
+            voice = message['voice']
+            file_id = voice['file_id']
+            duration = voice.get('duration', 0)
+            logger.info(f"🎤 Голосове від {user_name}: {duration}с")
+            
+            # Транскрибуємо голосове повідомлення
+            from modules.telegram_webhook.voice_handler import transcribe_voice_message
+            text = transcribe_voice_message(file_id, BOT_TOKEN)
+            
+            if not text:
+                send_message(chat_id, "❌ Не вдалося розпізнати голосове повідомлення. Спробуйте ще раз або напишіть текстом.")
+                return jsonify({"ok": True})
+            
+            # Повідомляємо що розпізнали
+            send_message(chat_id, f"🎤 Розпізнано: \"{text}\"")
+            logger.info(f"📝 Транскрипція: {text}")
+        else:
+            text = message.get('text', '').strip()
+            logger.info(f"📨 Від {user_name}: {text[:80]}")
 
         # Обробляємо команди
         if text.startswith('/'):
@@ -77,7 +97,7 @@ def webhook():
                     "/help — довідка\n"
                     "/status — статус системи\n"
                     "/briefing — інформація про брифінг\n\n"
-                    "Або просто напишіть ваше запитання!"
+                    "💬 Напишіть текстом або 🎤 надішліть голосове повідомлення!"
                 )
             elif text == '/help':
                 reply = (
@@ -85,7 +105,7 @@ def webhook():
                     "/start — Початок\n"
                     "/status — Статус системи\n"
                     "/briefing — Про щоденний брифінг\n\n"
-                    "Ви також можете написати будь-що і я відповім."
+                    "💬 Можете писати текстом або 🎤 надіслати голосове повідомлення — я його розпізнаю і відповім!"
                 )
             elif text == '/status':
                 reply = "✅ Система працює!\n\nWebhook: активний\nBrief: щодня о 06:00 Kyiv\nEmail: andrewbelin6@gmail.com"
