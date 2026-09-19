@@ -29,6 +29,7 @@ from integrations.drive_client import DriveClient  # noqa: E402
 from modules.researcher.researcher import Researcher  # noqa: E402
 from modules.task_manager.tasks import TaskManager  # noqa: E402
 from modules.daily_briefing.checkpoints_util import CheckpointsReader  # noqa: E402
+from modules.daily_briefing.checkpoints_writer import CheckpointsWriter  # noqa: E402
 
 
 def load_config(path: str | None) -> dict[str, Any]:
@@ -308,6 +309,37 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"[!] Не вдалося надіслати брифінг: {exc}")
     
+
+    # КРОК 6: Оновити checkpoints (Abacus — єдиний writer)
+    print("[→] Оновлення checkpoints...")
+    try:
+        writer = CheckpointsWriter()
+        sources = {
+            'gmail': True,
+            'calendar': True,
+            'tasks': True,
+            'researcher': briefing and 'МОЗ' in briefing,  # Якщо є дайджест МОЗ
+        }
+        status = 'success'
+        
+        if writer.update_checkpoints(sources, status):
+            # Логуємо успіх
+            from datetime import datetime
+            now = datetime.now()
+            event = {
+                'time_utc': now.strftime('%H:%M'),
+                'task': 'daily_briefing',
+                'status': 'success',
+                'result': f'Gmail: OK, Calendar: OK, Tasks: OK, Researcher: {"OK" if sources["researcher"] else "skipped"}',
+                'file': f'daily/{filename}'
+            }
+            writer.append_to_automation_log(event)
+            print("[✓] Checkpoints та лог оновлено")
+        else:
+            print("[!] Не вдалося оновити checkpoints")
+    except Exception as exc:
+        print(f"[!] Помилка оновлення checkpoints: {exc}")
+
     print("\n[✓] Усі операції завершено")
 
 

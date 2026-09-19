@@ -1,36 +1,68 @@
-name: Щоденний брифінг Command Center
+name: "Daily Briefing & Automation"
 
 on:
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 4 * * *"   # 04:00 UTC = 07:00 Europe/Kyiv
+    - cron: "35 6 * * *"  # 06:35 UTC = 08:35 Europe/Kyiv (post-briefing VAIT check)
   workflow_dispatch:
 
 jobs:
-  briefing:
+  daily-briefing:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch'
+    
     steps:
-      - name: Клонування репозиторію
+      - name: Checkout
         uses: actions/checkout@v4
-      - name: Налаштування Python
-        uses: actions/setup-python@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
-          cache: "pip"
-      - name: Встановлення залежностей
-        run: pip install -r requirements.txt
-      - name: Підготовка облікових даних
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Run Daily Briefing
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
-        run: |
-          printf '%s' "$GOOGLE_CREDENTIALS" > credentials.json
-          printf '%s' "$GOOGLE_TOKEN" > token.json
-      - name: Формування брифінгу
         run: python modules/daily_briefing/briefing.py
-      - name: Збереження артефакту
-        uses: actions/upload-artifact@v4
+
+      - name: Commit & Push
+        run: |
+          git config user.email "abacus@github.local"
+          git config user.name "Abacus Agent"
+          git add -A
+          git diff-index --quiet HEAD || git commit -m "chore: daily briefing $(date +'%Y-%m-%d')"
+          git push || echo "Nothing to push"
+
+  vait-postcheck:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '35 6 * * *'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          name: daily-briefing
-          path: briefings/*.md
-          retention-days: 30
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: VAIT Post-Briefing Control
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+        run: python modules/daily_briefing/vait_postcheck.py
+
+      - name: Commit & Push
+        run: |
+          git config user.email "abacus@github.local"
+          git config user.name "Abacus Agent"
+          git add -A
+          git diff-index --quiet HEAD || git commit -m "chore: vait-postcheck $(date +'%Y-%m-%d')"
+          git push || echo "Nothing to push"
