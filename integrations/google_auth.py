@@ -21,10 +21,15 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 # Області доступу (scopes) для всіх сервісів Command Center.
+# ВАЖЛИВО: цей перелік має точно відповідати scopes в authorize.py,
+# інакше при оновленні токена частина дозволів «губиться» (token.json
+# перезаписується лише з переліченими тут scopes).
 DEFAULT_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 

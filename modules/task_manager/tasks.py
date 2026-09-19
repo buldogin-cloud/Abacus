@@ -1,17 +1,22 @@
 """Модуль управління завданнями (Task Manager).
 
-Клас :class:`TaskManager` веде реєстр завдань у Google Sheets. Очікувана
-структура таблиці (аркуш ``Завдання``), перший рядок — заголовки:
+Клас :class:`TaskManager` веде реєстр завдань у Google Sheets. Реальна
+структура таблиці «Секретар — реєстр завдань», аркуш ``Реєстр``,
+перший рядок — заголовки:
 
-    ID | Завдання | Відповідальний | Термін | Статус | Примітки
+    Пріоритет | № документа | Дата | Назва |
+    Завдання / очікуваний результат | Моя роль |
+    Виконавець / підрозділ | Строк | Статус | Остання відповідь / доказ
 
-Статуси: ``Нове``, ``В роботі``, ``Виконано``, ``Скасовано``.
+Статуси в реєстрі — описові (наприклад «Постійне», «Частково виконано»,
+«Прострочено — ...», «У процесі»). Тому «завершеність» визначається за
+ключовими словами (див. :func:`_is_done`), а не за фіксованим набором.
 """
 
 from __future__ import annotations
 
+import re
 import sys
-import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -21,13 +26,74 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from integrations.sheets_client import SheetsClient  # noqa: E402
 
-# Статуси, що вважаються «відкритими» (незавершеними).
-OPEN_STATUSES = {"Нове", "В роботі", ""}
-DONE_STATUSES = {"Виконано", "Скасовано"}
+# --- Назви колонок у реальній таблиці ---
+COL_PRIORITY = "Пріоритет"
+COL_DOC = "№ документа"
+COL_DATE = "Дата"
+COL_TITLE = "Назва"
+COL_TASK = "Завдання / очікуваний результат"
+COL_ROLE = "Моя роль"
+COL_ASSIGNEE = "Виконавець / підрозділ"
+COL_DEADLINE = "Строк"
+COL_STATUS = "Статус"
+COL_PROOF = "Остання відповідь / доказ"
 
-# Назва аркуша та діапазон за замовчуванням.
-DEFAULT_SHEET = "Завдання"
-DEFAULT_RANGE = f"{DEFAULT_SHEET}!A1:F1000"
+# Назва аркуша та діапазон за замовчуванням (10 колонок A:J).
+DEFAULT_SHEET = "Реєстр"
+DEFAULT_RANGE_COLS = "A1:J1000"
+
+# Індекс колонки «Статус» для оновлення (I = 9-та колонка).
+STATUS_COLUMN_LETTER = "I"
+
+
+def _is_done(status: str) -> bool:
+    """Визначає, чи завдання ПОВНІСТЮ завершене (за ключовими словами).
+
+    «Частково виконано» вважається відкритим завданням.
+    """
+    s = (status or "").lower().strip()
+    if not s:
+        return False
+    if "частково" in s:
+        return False
+    return any(k in s for k in ("виконано", "закрито", "скасовано", "завершено"))
+
+
+def _extract_date(text: str) -> date | None:
+    """Витягує першу дату (DD.MM.YYYY або YYYY-MM-DD) з довільного тексту."""
+    if not text:
+        return None
+    # Формат DD.MM.YYYY
+    m = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", text)
+    if m:
+        try:
+            return datetime.strptime(m.group(0), "%d.%m.%Y").date()
+        except ValueError:
+            pass
+    # Формат YYYY-MM-DD
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if m:
+        try:
+            return datetime.strptime(m.group(0), "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    return None
+
+
+def _normalize(record: dict[str, str]) -> dict[str, str]:
+    """Перетворює «сирий» рядок таблиці у зручний словник для брифінгу."""
+    return {
+        # Ключі, які очікує форматувальник брифінгу.
+        "Завдання": record.get(COL_TITLE, "").strip(),
+        "Деталі": record.get(COL_TASK, "").strip(),
+        "Термін": record.get(COL_DEADLINE, "").strip(),
+        "Відповідальний": record.get(COL_ASSIGNEE, "").strip(),
+        "Статус": record.get(COL_STATUS, "").strip(),
+        "Пріоритет": record.get(COL_PRIORITY, "").strip(),
+        "Документ": record.get(COL_DOC, "").strip(),
+        "Доказ": record.get(COL_PROOF, "").strip(),
+        "_row": record.get("_row"),
+    }
 
 
 class TaskManager:
@@ -37,76 +103,61 @@ class TaskManager:
         """Ініціалізує менеджер завдань.
 
         :param spreadsheet_id: ID таблиці Google Sheets.
-        :param sheet_name: назва аркуша із завданнями.
+        :param sheet_name: назва аркуша із завданнями (за замовчуванням «Реєстр»).
         """
         self.client = SheetsClient(spreadsheet_id)
         self.sheet_name = sheet_name
-        self.range = f"{sheet_name}!A1:F1000"
+        self.range = f"{sheet_name}!{DEFAULT_RANGE_COLS}"
 
-    @staticmethod
-    def _is_overdue(deadline: str, status: str) -> bool:
-        """Перевіряє, чи прострочене завдання (термін минув, ще не завершене)."""
-        if status in DONE_STATUSES or not deadline:
+    def _is_overdue(self, deadline: str, status: str) -> bool:
+        """Перевіряє, чи прострочене завдання.
+
+        Прострочене, якщо: (а) статус містить «прострочено», або
+        (б) з поля «Строк» вдалося витягти дату, і вона вже минула —
+        і завдання не завершене.
+        """
+        if _is_done(status):
             return False
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
-            try:
-                due = datetime.strptime(deadline.strip(), fmt).date()
-                return due < date.today()
-            except ValueError:
-                continue
+        if "прострочено" in (status or "").lower():
+            return True
+        due = _extract_date(deadline)
+        if due is not None:
+            return due < date.today()
         return False
 
     def get_open_tasks(self) -> list[dict[str, str]]:
-        """Повертає всі відкриті (незавершені) завдання."""
-        records = self.client.read_records(self.range)
-        return [r for r in records if r.get("Статус", "") not in DONE_STATUSES]
-
-    def get_overdue_tasks(self) -> list[dict[str, str]]:
-        """Повертає прострочені завдання (термін минув, не завершені)."""
+        """Повертає всі відкриті (незавершені) завдання, нормалізовані."""
         records = self.client.read_records(self.range)
         return [
-            r
+            _normalize(r)
             for r in records
-            if self._is_overdue(r.get("Термін", ""), r.get("Статус", ""))
+            if r.get(COL_TITLE, "").strip() and not _is_done(r.get(COL_STATUS, ""))
         ]
 
-    def add_task(
-        self,
-        title: str,
-        assignee: str = "",
-        deadline: str = "",
-        notes: str = "",
-        status: str = "Нове",
-    ) -> dict[str, Any]:
-        """Додає нове завдання у реєстр.
-
-        :param title: назва/опис завдання.
-        :param assignee: відповідальний.
-        :param deadline: термін виконання (YYYY-MM-DD або DD.MM.YYYY).
-        :param notes: примітки.
-        :param status: початковий статус.
-        :return: результат додавання рядка + згенерований ID.
-        """
-        task_id = uuid.uuid4().hex[:8]
-        row = [task_id, title, assignee, deadline, status, notes]
-        result = self.client.append_row(self.range, row)
-        result["task_id"] = task_id
+    def get_overdue_tasks(self) -> list[dict[str, str]]:
+        """Повертає прострочені завдання (термін минув / статус «Прострочено»)."""
+        records = self.client.read_records(self.range)
+        result = []
+        for r in records:
+            if not r.get(COL_TITLE, "").strip():
+                continue
+            if self._is_overdue(r.get(COL_DEADLINE, ""), r.get(COL_STATUS, "")):
+                result.append(_normalize(r))
         return result
 
-    def update_task_status(self, task_id: str, new_status: str) -> dict[str, Any]:
-        """Оновлює статус завдання за його ID.
-
-        :param task_id: ідентифікатор завдання (колонка ID).
-        :param new_status: новий статус.
-        :raises ValueError: якщо завдання з таким ID не знайдено.
-        """
+    def get_all_tasks(self) -> list[dict[str, str]]:
+        """Повертає всі завдання (нормалізовані), для повного огляду реєстру."""
         records = self.client.read_records(self.range)
-        for r in records:
-            if r.get("ID") == task_id:
-                # Статус — 5-та колонка (E).
-                cell = f"{self.sheet_name}!E{r['_row']}"
-                return self.client.update_cell(cell, new_status)
-        raise ValueError(f"Завдання з ID '{task_id}' не знайдено.")
+        return [_normalize(r) for r in records if r.get(COL_TITLE, "").strip()]
+
+    def update_task_status(self, row: int, new_status: str) -> dict[str, Any]:
+        """Оновлює статус завдання за номером рядка в таблиці.
+
+        :param row: номер рядка (значення ``_row`` з нормалізованого запису).
+        :param new_status: новий текст статусу.
+        """
+        cell = f"{self.sheet_name}!{STATUS_COLUMN_LETTER}{row}"
+        return self.client.update_cell(cell, new_status)
 
 
 if __name__ == "__main__":
@@ -115,4 +166,10 @@ if __name__ == "__main__":
         tm = TaskManager(sys.argv[1])
         print("Відкриті завдання:")
         for t in tm.get_open_tasks():
-            print(f"  • [{t.get('Статус')}] {t.get('Завдання')} (до {t.get('Термін')})")
+            print(
+                f"  • [{t.get('Пріоритет')}] {t.get('Завдання')} "
+                f"— {t.get('Статус')} (строк: {t.get('Термін') or '—'})"
+            )
+        print("\nПрострочені:")
+        for t in tm.get_overdue_tasks():
+            print(f"  ⚠️ {t.get('Завдання')} — {t.get('Статус')}")

@@ -124,7 +124,7 @@ def _format_calendar_section(calendar: CalendarClient, cfg: dict[str, Any]) -> s
 def _format_tasks_section(cfg: dict[str, Any]) -> str:
     """Формує секцію завдань (відкриті + прострочені)."""
     spreadsheet_id = cfg.get("spreadsheet_id", "")
-    sheet_name = cfg.get("sheet_name", "Завдання")
+    sheet_name = cfg.get("sheet_name", "Реєстр")
     lines = ["## ✅ Завдання", ""]
 
     if not spreadsheet_id or spreadsheet_id == "ВАШ_SPREADSHEET_ID":
@@ -139,23 +139,34 @@ def _format_tasks_section(cfg: dict[str, Any]) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"## ✅ Завдання\n\n_Помилка доступу до Google Sheets: {exc}_\n"
 
+    # Рядки прострочених показуємо окремо; щоб не дублювати їх у списку
+    # відкритих, формуємо множину номерів рядків прострочених завдань.
+    overdue_rows = {t.get("_row") for t in overdue}
+
     if overdue:
         lines.append(f"### ⚠️ Прострочені ({len(overdue)})")
         for t in overdue:
+            prio = t.get("Пріоритет")
+            prio_str = f"{prio} · " if prio else ""
             lines.append(
-                f"- **{t.get('Завдання')}** — до {t.get('Термін')} "
-                f"({t.get('Відповідальний') or 'без відповідального'})"
+                f"- {prio_str}**{t.get('Завдання')}** — строк: {t.get('Термін') or '—'} "
+                f"({t.get('Відповідальний') or 'без виконавця'})"
             )
         lines.append("")
 
+    # Решта відкритих завдань (без уже показаних прострочених).
+    other_open = [t for t in open_tasks if t.get("_row") not in overdue_rows]
     lines.append(f"### Відкриті завдання ({len(open_tasks)})")
-    if open_tasks:
-        for t in open_tasks:
-            status = t.get("Статус") or "Нове"
+    if other_open:
+        for t in other_open:
+            prio = t.get("Пріоритет")
+            prio_str = f"{prio} · " if prio else ""
+            status = t.get("Статус") or "—"
             lines.append(
-                f"- [{status}] **{t.get('Завдання')}** — до {t.get('Термін') or '—'}"
+                f"- {prio_str}**{t.get('Завдання')}** "
+                f"— _{status}_ (строк: {t.get('Термін') or '—'})"
             )
-    else:
+    elif not overdue:
         lines.append("_Відкритих завдань немає._")
     lines.append("")
     return "\n".join(lines)

@@ -32,7 +32,7 @@ tasks:
   # ID таблиці Google Sheets із завданнями (з URL таблиці).
   spreadsheet_id: "11oqxqRm7cAH6jpKf9T7CYtIY0j01LAV259F7NGkd5so"
   # Назва аркуша із завданнями.
-  sheet_name: "Завдання"
+  sheet_name: "Реєстр"
 
 # --- Дослідник (моніторинг джерел) ---
 researcher:
