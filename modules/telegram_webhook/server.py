@@ -130,3 +130,33 @@ def index():
 if __name__ == '__main__':
     logger.info(f"🤖 Запуск на порту {PORT} | Token set: {bool(BOT_TOKEN)}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
+
+
+def _setup_google_credentials():
+    """Записати Google credentials з env variables на диск якщо є."""
+    import json
+    base = Path(__file__).resolve().parent.parent.parent
+
+    google_token = os.environ.get('GOOGLE_TOKEN', '')
+    google_creds = os.environ.get('GOOGLE_CREDENTIALS', '')
+
+    if google_token:
+        try:
+            token_path = base / 'token.json'
+            token_path.write_text(google_token)
+            logger.info(f"✅ token.json записано ({len(google_token)} символів)")
+        except Exception as e:
+            logger.error(f"Помилка запису token.json: {e}")
+
+    if google_creds:
+        try:
+            creds_path = base / 'credentials.json'
+            creds_path.write_text(google_creds)
+            logger.info(f"✅ credentials.json записано ({len(google_creds)} символів)")
+        except Exception as e:
+            logger.error(f"Помилка запису credentials.json: {e}")
+
+
+# Налаштовуємо Google credentials при старті
+from pathlib import Path
+_setup_google_credentials()
