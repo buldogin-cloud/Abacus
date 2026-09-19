@@ -67,7 +67,23 @@ class TelegramWebhookHandler:
             
             # Логуємо вхідне повідомлення
             user_name = message['from'].get('first_name', 'Unknown')
+            username = message['from'].get('username', '')
             logger.info(f"📨 Від {user_name} (ID:{user_id}): {text[:100]}")
+
+            # Автоматично зберігаємо chat_id власника
+            try:
+                import json as _json, os as _os
+                _ids_file = _os.path.join(_os.path.dirname(__file__), '..', '..', 'chat_ids.json')
+                _ids = {}
+                if _os.path.exists(_ids_file):
+                    with open(_ids_file) as _f:
+                        _ids = _json.load(_f)
+                _ids[username or str(user_id)] = chat_id
+                _ids['_last'] = chat_id
+                with open(_ids_file, 'w') as _f:
+                    _json.dump(_ids, _f, indent=2)
+            except Exception as _e:
+                logger.warning(f"Не вдалося зберегти chat_id: {_e}")
             
             # Перевіримо чи це команда /start або /help
             if text.startswith('/'):

@@ -296,18 +296,19 @@ def main() -> None:
     if args.stdout:
         print("\n" + briefing)
 
-    # КРОК 5: Необовʼязкова розсилка брифінгу на пошту
+    # КРОК 5: Надсилання брифінгу у Telegram
     delivery = config.get("delivery", {})
-    if delivery.get("send_email") and delivery.get("email_to"):
+    if delivery.get("send_telegram", True):
         try:
-            GmailClient().send_message(
-                to=delivery["email_to"],
-                subject=f"Щоденний брифінг — {datetime.now():%d.%m.%Y}",
-                body=briefing,
-            )
-            print(f"[✓] Брифінг надіслано на {delivery['email_to']}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[!] Не вдалося надіслати брифінг: {exc}")
+            from integrations.telegram_sender import send_briefing
+            header = f"📋 *Щоденний брифінг — {datetime.now():%d.%m.%Y}*\n\n"
+            ok = send_briefing(header + briefing)
+            if ok:
+                print("[✓] Брифінг надіслано у Telegram")
+            else:
+                print("[!] Не вдалося надіслати у Telegram (chat_id не відомий?)")
+        except Exception as exc:
+            print(f"[!] Помилка Telegram-надсилання: {exc}")
     
 
     # КРОК 6: Оновити checkpoints (Abacus — єдиний writer)

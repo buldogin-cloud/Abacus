@@ -54,7 +54,7 @@ researcher:
 
 # --- Надсилання брифінгу ---
 delivery:
-  # Надіслати на пошту (true/false)
-  send_email: true
-  # Email отримувача
-  email_to: "andrewbelin6@gmail.com"
+  # Надіслати у Telegram (true/false)
+  send_telegram: true
+  # email вимкнено — замінено на Telegram
+  send_email: false
