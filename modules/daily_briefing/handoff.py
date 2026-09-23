@@ -153,10 +153,11 @@ def classify_handoff(record: dict, registry_match: dict | None) -> str:
     if source == "gmail" and category in PRIORITY_CATEGORIES:
         return "new_task"
 
-    # Наказ / розпорядження з МОЗ/НСЗУ → нова задача
-    if source in ("moz_ukraine", "nszu"):
+    # Наказ / постанова / розпорядження з МОЗ / НСЗУ / КМУ → нова задача
+    if source in ("moz_ukraine", "nszu", "kmu_cabinet"):
         if any(kw in (record.get("title") or "").lower()
-               for kw in ["наказ", "розпорядження", "затверджено", "зміни"]):
+               for kw in ["наказ", "постанов", "розпорядженн",
+                          "затверджено", "зміни", "стандарт"]):
             return "new_task"
         return "info_only"
 

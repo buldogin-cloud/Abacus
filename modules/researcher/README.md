@@ -1,32 +1,83 @@
 # Модуль «Дослідник» (Researcher)
 
-Моніторить офіційні джерела — **МОЗ України** та **НСЗУ** — а також
-профільні новини за ключовими словами, формуючи короткий дайджест.
+Моніторить офіційні джерела — **МОЗ України**, **НСЗУ** та **Кабінет
+Міністрів (Урядовий портал)** — а також профільні накази й новини за
+ключовими словами, формуючи короткий дайджест зі **чесним статусом кожного
+джерела**.
+
+## Чому не «прямий» доступ до moz.gov.ua / nszu.gov.ua
+
+Сайти `moz.gov.ua` та `nszu.gov.ua` стоять за **Cloudflare JS-challenge**:
+прямий HTTP-запит (навіть з реалістичним User-Agent або через `cloudscraper`)
+повертає **HTTP 403 / "Just a moment…"**. Раніше модуль мовчки ловив цю
+помилку і повертав `[]`, тож Дослідник щоразу звітував «успіх, 0 записів» —
+і саме тому **пропустив важливі документи** (наприклад накази МОЗ і
+постанову КМУ №1158 від 21.09.2026).
+
+Тепер модуль:
+
+1. **Все одно робить прямий запит** — але лише щоб зафіксувати **реальний
+   статус** сайту (`blocked`, коли Cloudflare віддає 403).
+2. **Використовує обхідні канали**, які реально доступні:
+   - **Google News RSS** (`news.google.com/rss/search`) — не за Cloudflare,
+     дозволяє шукати `site:moz.gov.ua`, `site:nszu.gov.ua`, `site:kmu.gov.ua`.
+   - **aaukr.org/mozcat/nakazy-moz** — профільне дзеркало наказів МОЗ
+     (HTTP 200), звідки парсяться номер, дата та назва наказу.
+   - **kmu.gov.ua** (Урядовий портал) — не за Cloudflare; постанови КМУ
+     збираються через Google News з медичним фокусом.
+3. **Звітує статус кожного джерела** (`ok` / `blocked` / `error` / `empty`)
+   у `self.source_status` та у дайджесті — щоб Секретар (ChatGPT) бачив
+   «діру», а не хибний нуль.
 
 ## Використання
 
 ```python
 from modules.researcher.researcher import Researcher
 
-researcher = Researcher(keywords=["анестезіолог", "закупівл", "стандарт"])
+researcher = Researcher(keywords=["анестезіолог", "постанов", "стандарт"])
 
-researcher.search_moz_updates(limit=10)    # оновлення МОЗ
-researcher.search_nszu_updates(limit=10)   # оновлення НСЗУ
-print(researcher.generate_digest())        # markdown-дайджест
+# Структурований збір (для конвеєра collector.py):
+data = researcher.collect(limit_per_source=6)
+#   data["records"]         — список знайдених матеріалів
+#   data["source_status"]   — {джерело: ok|blocked|error|empty}
+#   data["blocked_sources"] — які джерела заблоковані (Cloudflare)
+
+# Готовий markdown-дайджест зі статусами джерел:
+print(researcher.generate_digest(limit_per_source=6))
 ```
 
 ## Методи
 
 | Метод | Опис |
 |-------|------|
-| `search_moz_updates(limit)` | Останні новини з сайту МОЗ. |
-| `search_nszu_updates(limit)` | Останні новини з сайту НСЗУ. |
+| `collect(limit_per_source)` | Структурований збір + статуси джерел (для collector). |
+| `search_moz_updates(limit)` | Накази МОЗ (aaukr) + новини МОЗ (Google News). |
+| `search_nszu_updates(limit)` | Оновлення НСЗУ через Google News. |
+| `search_kmu_updates(limit)` | Постанови/розпорядження КМУ (Урядовий портал). |
+| `search_moz_orders(limit)` | Парсинг наказів МОЗ з дзеркала aaukr.org. |
+| `search_google_news(query, source, limit)` | Пошук через Google News RSS. |
 | `search_rss(feed_url, source, limit)` | Записи з довільної RSS-стрічки. |
-| `generate_digest(limit_per_source)` | Зведений дайджест у markdown. |
+| `generate_digest(limit_per_source)` | Зведений дайджест у markdown зі статусами. |
+
+## Формат запису
+
+```python
+{
+    "source": "Накази МОЗ (aaukr)",   # людська назва джерела
+    "title": "Про систему анестезіологічної та інтенсивної допомоги…",
+    "order_no": "1675",                # лише для наказів з aaukr
+    "date": "2025-11-03",              # ISO-дата (для наказів)
+    "url": "https://…",
+    "via": "aaukr",                    # aaukr | google_news | rss
+}
+```
 
 ## Примітки
 
-- Джерела зчитуються через HTTP/HTML (та RSS для `search_rss`).
+- Заголовки коротші за 20 символів відсікаються (щоб не тягнути «Наказ», «602»).
 - За відсутності мережі або зміни структури сайтів методи повертають
-  порожні списки, **не перериваючи** роботу щоденного брифінгу.
+  порожні списки й позначають джерело як `error`/`blocked`, **не перериваючи**
+  роботу щоденного брифінгу.
 - Ключові слова фільтрують заголовки без урахування регістру.
+- Дослідник — **фоновий технічний агент**: він лише знаходить і структурує
+  матеріали. Управлінські та клінічні висновки робить Секретар (ChatGPT).

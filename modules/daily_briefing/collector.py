@@ -373,8 +373,12 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
         from modules.researcher.researcher import Researcher
         researcher = Researcher(keywords=cfg.get("keywords", []))
         limit = cfg.get("limit_per_source", 5)
-        moz_items = researcher.search_moz_updates(limit=limit)
-        nszu_items = researcher.search_nszu_updates(limit=limit)
+        # Новий інтерфейс: collect() повертає записи + статуси джерел.
+        collected = researcher.collect(limit_per_source=limit)
+        source_status = collected["source_status"]
+        blocked_sources = collected["blocked_sources"]
+        errored_sources = collected["errored_sources"]
+        all_items = collected["records"]
     except Exception as exc:
         return SourceResult(
             source="researcher",
@@ -386,48 +390,63 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
             error=str(exc),
         )
 
+    # Зіставлення людської назви джерела → канонічний код для Secretary.
+    def _primary_source(human_name: str) -> str:
+        low = human_name.lower()
+        if "кму" in low:
+            return "kmu_cabinet"
+        if "нсзу" in low:
+            return "nszu"
+        return "moz_ukraine"
+
     records = []
-    for item in moz_items:
+    for item in all_items:
+        human_src = item.get("source", "")
+        title = item.get("title", "")
+        # Номер+дата наказу (з aaukr) додаємо у заголовок для наочності.
+        display_title = title
+        if item.get("order_no"):
+            display_title = f"№{item['order_no']} від {item.get('date','')} — {title}"
         records.append({
-            "source": "moz_ukraine",
-            "source_id": item.get("url", "") or item.get("title", ""),
+            "source": _primary_source(human_src),
+            "source_id": item.get("url", "") or title,
             "detected_at": checked_at,
-            "title": item.get("title", ""),
+            "title": display_title,
             "url": item.get("url", ""),
-            "published_at": item.get("date", ""),
-            "factual_summary": item.get("summary", ""),
-            "document_type": item.get("type", "unknown"),
+            "published_at": item.get("date", "") or item.get("published", ""),
+            "factual_summary": "",
+            "document_type": "наказ" if item.get("order_no") else "новина",
             "change_status": "NEW",  # буде уточнено дедуплікатором
-            "primary_source": "moz_ukraine",
-            "source_verified": True,
-            # Поля для Secretary
-            "potential_impact_areas": _guess_impact_areas(item.get("title", "")),
+            "primary_source": _primary_source(human_src),
+            "source_channel": item.get("via", ""),  # google_news / aaukr / rss
+            "source_label": human_src,
+            "source_verified": item.get("via") == "aaukr",  # напряму з дзеркала
+            "potential_impact_areas": _guess_impact_areas(title),
         })
 
-    for item in nszu_items:
-        records.append({
-            "source": "nszu",
-            "source_id": item.get("url", "") or item.get("title", ""),
-            "detected_at": checked_at,
-            "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "published_at": item.get("date", ""),
-            "factual_summary": item.get("summary", ""),
-            "document_type": item.get("type", "unknown"),
-            "change_status": "NEW",
-            "primary_source": "nszu",
-            "source_verified": True,
-            "potential_impact_areas": _guess_impact_areas(item.get("title", "")),
-        })
+    # Чесний статус: якщо частина джерел заблокована/впала, це partial,
+    # навіть коли резервні канали дали записи. Так Secretary бачить діру.
+    if blocked_sources or errored_sources:
+        status = "partial"
+    else:
+        status = "success"
 
-    return SourceResult(
+    error_note = None
+    if blocked_sources:
+        error_note = "Заблоковано (Cloudflare): " + ", ".join(blocked_sources)
+
+    result = SourceResult(
         source="researcher",
-        status="success",
+        status=status,
         checked_at=checked_at,
         window_start=window_start,
         window_end=checked_at,
         records=records,
+        error=error_note,
     )
+    # Додаємо статуси джерел як метадані (для логів/дайджесту Secretary).
+    result.source_status = source_status  # type: ignore[attr-defined]
+    return result
 
 
 def _guess_impact_areas(title: str) -> list[str]:
