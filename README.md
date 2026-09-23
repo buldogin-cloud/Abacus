@@ -70,19 +70,36 @@ cp modules/daily_briefing/config.example.yaml config.yaml
 # Відредагуйте config.yaml: вкажіть ID таблиці завдань, email, ключові слова тощо.
 ```
 
-### 4. Запуск щоденного брифінгу
+### 4. Запуск handoff pipeline
 
 ```bash
+# Повний запуск (збір + handoff + Drive)
 python modules/daily_briefing/briefing.py
+
+# Детальний вивід у stdout
+python modules/daily_briefing/briefing.py --stdout
+
+# Тестовий режим (без запису на Drive)
+python modules/daily_briefing/briefing.py --stdout --no-drive
 ```
 
-Результат буде збережено у `briefings/briefing_YYYY-MM-DD.md`.
+**Результат**: 
+- Handoff файл на Drive: `Command Center/handoffs/secretary/handoff_YYYY-MM-DD.jsonl`
+- Structured logs: `Command Center/handoff_runs.jsonl`
+- Telegram summary надіслано
 
 ---
 
 ## 🤖 Автоматизація (GitHub Actions)
 
-Workflow [`daily_briefing.yml`](.github/workflows/daily_briefing.yml) запускається **щодня о 07:00 за Києвом (04:00 UTC)**, виконує `briefing.py` та зберігає результат як артефакт.
+Workflow [`daily_briefing.yml`](.github/workflows/daily_briefing.yml) запускається **щодня о 07:00 за Києвом (04:00 UTC)** та виконує handoff pipeline.
+
+**Що відбувається**:
+1. Abacus збирає дані з Gmail/Calendar/Tasks/Researcher
+2. Дедуплікація та класифікація записів
+3. Створення `handoff_YYYY-MM-DD.jsonl` на Drive
+4. Telegram summary для Андрія
+5. **Secretary** (ChatGPT) читає handoff та формує брифінг
 
 Для роботи у CI додайте у **Settings → Secrets and variables → Actions** секрети:
 
@@ -90,7 +107,8 @@ Workflow [`daily_briefing.yml`](.github/workflows/daily_briefing.yml) запус
 |--------|------|
 | `GOOGLE_CREDENTIALS` | вміст `credentials.json` (OAuth client) |
 | `GOOGLE_TOKEN` | вміст `token.json` (отриманий локально після першої авторизації) |
-| `CONFIG_YAML` | вміст `config.yaml` |
+| `TELEGRAM_BOT_TOKEN` | токен Telegram бота (@AbacusSECbot) |
+| `TELEGRAM_CHAT_ID` | chat_id Андрія (5456389264) |
 
 ---
 
