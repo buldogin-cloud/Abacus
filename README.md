@@ -98,11 +98,83 @@ Workflow [`daily_briefing.yml`](.github/workflows/daily_briefing.yml) запус
 
 | Модуль | Призначення |
 |--------|-------------|
-| **daily_briefing** | Збирає листи, події календаря та завдання → структурований брифінг у markdown. |
+| **daily_briefing** | Оркестрація handoff pipeline: збір → дедуплікація → класифікація → передача Secretary. |
 | **task_manager** | Реєстр завдань у Google Sheets: створення, оновлення статусу, прострочені задачі. |
 | **researcher** | Моніторинг оновлень МОЗ, НСЗУ та профільних новин → дайджест. |
+| **doc_generator** | Генерація службових документів (службові записки) з автозавантаженням на Drive. |
 
 Кожен модуль має власний `README.md` з деталями.
+
+---
+
+## 🔄 Handoff Pipeline (Phase 1 — завершено)
+
+**Проблема**: Попередня версія `briefing.py` була монолітною — збирала дані, формувала брифінг, приймала управлінські рішення. Це змішувало технічну та управлінську відповідальність.
+
+**Рішення**: Розділення ролей між **Abacus** (фоновий технічний агент) та **ChatGPT Secretary** (основний секретар).
+
+### Архітектура
+
+```
+┌─────────────────────────────────────────┐
+│  ABACUS (фоновий агент)                  │
+│  ┌──────────┐  ┌──────────┐  ┌────────┐ │
+│  │collector │→ │ handoff  │→ │ Drive  │ │
+│  │(Layer 1) │  │(Layer 2) │  │ Writer │ │
+│  └──────────┘  └──────────┘  └────────┘ │
+└────────────────────┬────────────────────┘
+                     │
+       handoff_YYYY-MM-DD.jsonl
+       (Drive: Command Center/handoffs/secretary/)
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│  SECRETARY (основний секретар)           │
+│  ┌────────┐  ┌──────────┐  ┌─────────┐ │
+│  │ Reader │→ │ Briefing │→ │Registry │ │
+│  │        │  │Generator │  │ Updater │ │
+│  └────────┘  └──────────┘  └─────────┘ │
+└─────────────────────────────────────────┘
+```
+
+### Компоненти
+
+| Файл | Відповідальність |
+|------|------------------|
+| **collector.py** | Layer 1: Збір сирих даних з Gmail/Calendar/Tasks/Researcher |
+| **handoff.py** | Layer 2: Дедуплікація + класифікація + запис на Drive |
+| **briefing.py** | Оркестратор: checkpoints → collect → handoff → logs → Telegram |
+| **checkpoints_writer.py** | Стан останнього запуску + structured logs у `handoff_runs.jsonl` |
+
+### Обмеження Abacus
+
+⚠️ **Abacus НЕ МОЖЕ**:
+- Змінювати статуси завдань у реєстрі
+- Встановлювати/змінювати дедлайни
+- Призначати відповідальних
+- Вносити записи в Calendar
+
+✅ **Abacus МОЖЕ**:
+- Читати реєстр завдань (read-only)
+- Збирати дані з усіх джерел
+- Виявляти дублікати
+- Класифікувати записи: `new_task`, `update_existing`, `info_only`, `needs_review`
+- Передавати структуровані дані через Drive
+
+### Для Secretary
+
+Документація для ChatGPT Secretary:
+- **[SECRETARY_HANDOFF_PROTOCOL.md](docs/SECRETARY_HANDOFF_PROTOCOL.md)** — повний протокол обробки handoff
+- **[secretary_example.py](docs/secretary_example.py)** — робочий приклад Python скрипту
+
+**Запуск прикладу**:
+```bash
+# Dry-run (без записів у реєстр)
+python docs/secretary_example.py --date 2026-09-23 --briefing
+
+# Реальна обробка (додати задачі в реєстр)
+python docs/secretary_example.py --date 2026-09-23 --no-dry-run --briefing
+```
 
 ---
 
