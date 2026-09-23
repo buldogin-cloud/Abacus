@@ -1,42 +1,62 @@
-"""Модуль щоденного брифінгу (Daily Briefing).
+"""Оркестратор handoff-пайплайну (Abacus, Phase 1).
 
-Основний скрипт Command Center: збирає дані з Gmail (непрочитані та важливі
-листи за 24 год), Google Calendar (події на сьогодні та завтра), Google
-Sheets (поточні та прострочені завдання) і, за потреби, дайджест Дослідника.
-Результат — структурований щоденний брифінг у markdown-форматі.
+Abacus — технічний фоновий агент. Цей скрипт:
+
+    1. Зчитує checkpoints з Drive → визначає window_start
+    2. Запускає Collector — збирає сирі дані (Gmail / Calendar / Tasks / Researcher)
+    3. Запускає Handoff — дедуплікує, класифікує, записує SECRETARY_HANDOFF на Drive
+    4. Оновлює checkpoints (реальні статуси джерел)
+    5. Записує структурований лог прогону (handoff_runs.jsonl + automation_log.md)
+    6. Надсилає у Telegram короткий summary — НЕ брифінг
+
+НЕ виконує:
+    - НЕ інтерпретує зміст листів / документів
+    - НЕ формує управлінський брифінг (це робить Secretary)
+    - НЕ змінює реєстр завдань, дедлайни, статуси, Calendar
+
+Формат handoff-файлу на Drive:
+    Command Center / handoffs / secretary / handoff_YYYY-MM-DD.jsonl
+
+ChatGPT Secretary читає handoff → оновлює реєстр → формує брифінг.
 
 Запуск:
     python modules/daily_briefing/briefing.py [--config config.yaml]
+    python modules/daily_briefing/briefing.py --stdout          # детальна статистика
+    python modules/daily_briefing/briefing.py --no-drive        # без Drive (тест)
+    python modules/daily_briefing/briefing.py --stdout --no-drive
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-# Дозволяємо запуск як окремого скрипта (додаємо корінь проекту у sys.path).
+# Дозволяємо запуск як окремого скрипта (корінь проекту у sys.path).
 _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from integrations.calendar_client import CalendarClient  # noqa: E402
-from integrations.gmail_client import GmailClient  # noqa: E402
-from integrations.drive_client import DriveClient  # noqa: E402
-from modules.researcher.researcher import Researcher  # noqa: E402
-from modules.task_manager.tasks import TaskManager  # noqa: E402
-from modules.daily_briefing.checkpoints_util import CheckpointsReader  # noqa: E402
+from modules.daily_briefing.checkpoints_util import CheckpointsReader    # noqa: E402
 from modules.daily_briefing.checkpoints_writer import CheckpointsWriter  # noqa: E402
+from modules.daily_briefing.collector import CollectedData, collect_all  # noqa: E402
+from modules.daily_briefing.handoff import process_handoffs              # noqa: E402
 
+
+# ────────────────────────────────────────────────────────────
+# Конфігурація
+# ────────────────────────────────────────────────────────────
 
 def load_config(path: str | None) -> dict[str, Any]:
     """Завантажує конфігурацію з YAML-файлу.
 
-    Якщо файл не задано або відсутній — використовує config.yaml у корені,
-    а за його відсутності — приклад config.example.yaml.
+    Порядок пошуку:
+        1. Шлях із аргументу --config
+        2. config.yaml у корені проекту
+        3. modules/daily_briefing/config.example.yaml (fallback)
     """
     candidates = []
     if path:
@@ -47,300 +67,395 @@ def load_config(path: str | None) -> dict[str, Any]:
     for candidate in candidates:
         if candidate.exists():
             with open(candidate, encoding="utf-8") as f:
-                print(f"[i] Використано конфігурацію: {candidate}")
+                print(f"[i] Конфігурація: {candidate}")
                 return yaml.safe_load(f) or {}
+    print("[!] config.yaml не знайдено, використовуємо порожній конфіг")
     return {}
 
 
-# ---------------------------------------------------------------------- #
-# Секції брифінгу
-# ---------------------------------------------------------------------- #
-def _format_emails_section(gmail: GmailClient, cfg: dict[str, Any]) -> str:
-    """Формує секцію листів (непрочитані + важливі)."""
-    days = cfg.get("lookback_days", 1)
-    limit = cfg.get("max_messages", 15)
-    lines = ["## 📧 Пошта (за 24 години)", ""]
+# ────────────────────────────────────────────────────────────
+# Вікно збору
+# ────────────────────────────────────────────────────────────
 
-    try:
-        unread = gmail.get_unread_messages(days=days, max_results=limit)
-        important = gmail.get_important_messages(days=days, max_results=limit)
-    except Exception as exc:  # noqa: BLE001 — не зриваємо брифінг через одне джерело
-        return "## 📧 Пошта (за 24 години)\n\n_Помилка доступу до Gmail: " f"{exc}_\n"
+def get_window_start(checkpoints: dict) -> str:
+    """Визначити window_start з checkpoints.
 
-    lines.append(f"**Непрочитані:** {len(unread)} · **Важливі:** {len(important)}")
-    lines.append("")
+    Бере мінімальний (найстаріший) timestamp серед успішних перевірок,
+    щоб не пропустити жодного джерела. Fallback — 24 години тому.
+    """
+    from datetime import timedelta
 
-    if unread:
-        lines.append("### Непрочитані листи")
-        for m in unread:
-            lines.append(f"- **{m['subject']}** — _{m['from']}_")
-            if m.get("snippet"):
-                lines.append(f"  > {m['snippet'][:140]}")
+    fallback = (
+        datetime.now(timezone.utc) - timedelta(hours=24)
+    ).isoformat().replace("+00:00", "Z")
+
+    keys = [
+        "gmail_last_success",
+        "calendar_last_success",
+        "tasks_last_success",
+        "researcher_last_success",
+    ]
+    timestamps = []
+    for k in keys:
+        v = checkpoints.get(k, "")
+        if v and v not in ("N/A", ""):
+            timestamps.append(v)
+
+    if not timestamps:
+        return fallback
+
+    # Найстаріший timestamp — найширше вікно → нічого не пропустимо
+    return min(timestamps)
+
+
+# ────────────────────────────────────────────────────────────
+# Допоміжні функції
+# ────────────────────────────────────────────────────────────
+
+def _sources_status_dict(collected: CollectedData) -> dict:
+    """Побудувати {source: bool} для update_checkpoints()."""
+    return {
+        source: result.status == "success"
+        for source, result in collected.sources.items()
+    }
+
+
+def _build_run_detail(
+    collected: CollectedData,
+    handoff_result: dict,
+    window_start: str,
+    started_at: str,
+    finished_at: str,
+) -> dict:
+    """Побудувати повний структурований запис прогону для handoff_runs.jsonl."""
+    overall = collected.overall_status()
+    storage = handoff_result.get("storage_status", "unknown")
+
+    if overall == "success" and storage in ("success", "skipped"):
+        run_status = "success"
+    elif overall == "failed" or storage == "failed":
+        run_status = "failed"
     else:
-        lines.append("_Немає непрочитаних листів._")
-    lines.append("")
+        run_status = "partial"
 
-    if important:
-        lines.append("### Важливі листи")
-        for m in important:
-            lines.append(f"- **{m['subject']}** — _{m['from']}_")
-    lines.append("")
-    return "\n".join(lines)
+    sources_detail = {
+        source: {
+            "status": result.status,
+            "records_count": len(result.records),
+            "window_start": result.window_start,
+            "window_end": result.window_end,
+            "error": result.error,
+        }
+        for source, result in collected.sources.items()
+    }
 
-
-def _format_calendar_section(calendar: CalendarClient, cfg: dict[str, Any]) -> str:
-    """Формує секцію подій календаря (сьогодні + найближчі дні)."""
-    upcoming_days = cfg.get("upcoming_days", 2)
-    lines = ["## 📅 Календар", ""]
-
-    try:
-        today = calendar.get_today_events()
-        upcoming = calendar.get_upcoming_events(days=upcoming_days)
-    except Exception as exc:  # noqa: BLE001
-        return f"## 📅 Календар\n\n_Помилка доступу до Google Calendar: {exc}_\n"
-
-    lines.append("### Сьогодні")
-    if today:
-        for e in today:
-            when = "весь день" if e["all_day"] else e["start"][11:16]
-            loc = f" @ {e['location']}" if e["location"] else ""
-            lines.append(f"- **{when}** — {e['summary']}{loc}")
-    else:
-        lines.append("_Подій на сьогодні немає._")
-    lines.append("")
-
-    # Події завтра й далі (виключаємо сьогоднішні за ID).
-    today_ids = {e["id"] for e in today}
-    future = [e for e in upcoming if e["id"] not in today_ids]
-    if future:
-        lines.append("### Найближчі дні")
-        for e in future:
-            date_part = e["start"][:10]
-            when = "весь день" if e["all_day"] else e["start"][11:16]
-            lines.append(f"- **{date_part} {when}** — {e['summary']}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _format_tasks_section(cfg: dict[str, Any]) -> str:
-    """Формує секцію завдань (відкриті + прострочені)."""
-    spreadsheet_id = cfg.get("spreadsheet_id", "")
-    sheet_name = cfg.get("sheet_name", "Реєстр")
-    lines = ["## ✅ Завдання", ""]
-
-    if not spreadsheet_id or spreadsheet_id == "ВАШ_SPREADSHEET_ID":
-        lines.append("_Не налаштовано spreadsheet_id у config.yaml._")
-        lines.append("")
-        return "\n".join(lines)
-
-    try:
-        tm = TaskManager(spreadsheet_id, sheet_name=sheet_name)
-        open_tasks = tm.get_open_tasks()
-        overdue = tm.get_overdue_tasks()
-    except Exception as exc:  # noqa: BLE001
-        return f"## ✅ Завдання\n\n_Помилка доступу до Google Sheets: {exc}_\n"
-
-    # Рядки прострочених показуємо окремо; щоб не дублювати їх у списку
-    # відкритих, формуємо множину номерів рядків прострочених завдань.
-    overdue_rows = {t.get("_row") for t in overdue}
-
-    if overdue:
-        lines.append(f"### ⚠️ Прострочені ({len(overdue)})")
-        for t in overdue:
-            prio = t.get("Пріоритет")
-            prio_str = f"{prio} · " if prio else ""
-            lines.append(
-                f"- {prio_str}**{t.get('Завдання')}** — строк: {t.get('Термін') or '—'} "
-                f"({t.get('Відповідальний') or 'без виконавця'})"
-            )
-        lines.append("")
-
-    # Решта відкритих завдань (без уже показаних прострочених).
-    other_open = [t for t in open_tasks if t.get("_row") not in overdue_rows]
-    lines.append(f"### Відкриті завдання ({len(open_tasks)})")
-    if other_open:
-        for t in other_open:
-            prio = t.get("Пріоритет")
-            prio_str = f"{prio} · " if prio else ""
-            status = t.get("Статус") or "—"
-            lines.append(
-                f"- {prio_str}**{t.get('Завдання')}** "
-                f"— _{status}_ (строк: {t.get('Термін') or '—'})"
-            )
-    elif not overdue:
-        lines.append("_Відкритих завдань немає._")
-    lines.append("")
-    return "\n".join(lines)
+    return {
+        # Мета прогону
+        "run_id": collected.run_id,
+        "trigger": "scheduled",
+        "produced_by": "Abacus",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        # Вікно збору
+        "window_start": window_start,
+        "window_end": finished_at,
+        # Зведені статуси
+        "overall_status": run_status,
+        "source_check_status": overall,
+        "analysis_status": "done",
+        "storage_status": storage,
+        "handoff_status": storage,
+        # Деталі по кожному джерелу
+        "sources_checked": sources_detail,
+        # Результати handoff
+        "handoffs_written": handoff_result.get("handoffs_written", 0),
+        "handoffs_skipped_duplicate": handoff_result.get("handoffs_skipped_duplicate", 0),
+        "priority_handoffs": handoff_result.get("priority_handoffs", 0),
+        # Посилання на файли
+        "output_refs": {
+            "handoff_file": handoff_result.get("handoff_file", ""),
+            "handoff_folder_id": handoff_result.get("handoff_folder_id", ""),
+        },
+        # Помилки
+        "error": handoff_result.get("error"),
+    }
 
 
-def _format_researcher_section(cfg: dict[str, Any]) -> str:
-    """Формує секцію дайджесту Дослідника."""
-    if not cfg.get("enabled", False):
-        return ""
-    try:
-        researcher = Researcher(keywords=cfg.get("keywords", []))
-        moz = researcher.search_moz_updates(limit=cfg.get("limit_per_source", 5))
-        nszu = researcher.search_nszu_updates(limit=cfg.get("limit_per_source", 5))
-    except Exception as exc:  # noqa: BLE001
-        return f"## 📰 Дослідник\n\n_Помилка моніторингу джерел: {exc}_\n"
+def _build_telegram_summary(
+    collected: CollectedData,
+    handoff_result: dict,
+    window_start: str,
+) -> str:
+    """Формує короткий Telegram-summary для Андрія.
 
-    lines = ["## 📰 Дослідник (МОЗ / НСЗУ)", ""]
-    lines.append("### МОЗ України")
-    lines += [f"- [{it['title']}]({it['url']})" for it in moz] or ["_Немає нових записів._"]
-    lines.append("")
-    lines.append("### НСЗУ")
-    lines += [f"- [{it['title']}]({it['url']})" for it in nszu] or ["_Немає нових записів._"]
-    lines.append("")
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------- #
-# Головна логіка
-# ---------------------------------------------------------------------- #
-def build_briefing(config: dict[str, Any]) -> str:
-    """Збирає всі секції та повертає повний текст брифінгу (markdown)."""
+    НЕ є брифінгом — лише технічна інформація про прогін.
+    Брифінг формує Secretary після читання handoff.
+    """
     now = datetime.now()
-    header = [
-        f"# 🗂️ Щоденний брифінг Command Center",
-        f"**Дата:** {now:%A, %d.%m.%Y} · **Час формування:** {now:%H:%M}",
+    source_icons = {
+        "success": "✅",
+        "partial": "⚠️",
+        "failed": "❌",
+        "source_unavailable": "—",
+        "skipped": "—",
+    }
+    source_labels = {
+        "gmail": "Gmail",
+        "calendar": "Calendar",
+        "tasks": "Реєстр завдань",
+        "researcher": "МОЗ/НСЗУ",
+    }
+
+    lines = [
+        f"📡 *Abacus — прогін {now:%d.%m.%Y %H:%M}*",
         "",
-        "---",
-        "",
+        "*Джерела:*",
     ]
+    for source, result in collected.sources.items():
+        icon = source_icons.get(result.status, "?")
+        label = source_labels.get(source, source)
+        count = len(result.records)
+        lines.append(f"  {icon} {label}: {count} записів")
 
-    gmail = None
-    calendar = None
-    # Ініціалізуємо клієнтів окремо, щоб частковий збій не зривав увесь брифінг.
-    try:
-        gmail = GmailClient()
-    except Exception as exc:  # noqa: BLE001
-        print(f"[!] Не вдалося ініціалізувати Gmail: {exc}")
-    try:
-        calendar = CalendarClient(
-            calendar_id=config.get("calendar", {}).get("calendar_id", "primary")
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[!] Не вдалося ініціалізувати Calendar: {exc}")
+    lines.append("")
 
-    sections = []
-    if gmail is not None:
-        sections.append(_format_emails_section(gmail, config.get("gmail", {})))
-    if calendar is not None:
-        sections.append(_format_calendar_section(calendar, config.get("calendar", {})))
-    sections.append(_format_tasks_section(config.get("tasks", {})))
-    sections.append(_format_researcher_section(config.get("researcher", {})))
+    n_written = handoff_result.get("handoffs_written", 0)
+    n_skipped = handoff_result.get("handoffs_skipped_duplicate", 0)
+    n_priority = handoff_result.get("priority_handoffs", 0)
+    storage = handoff_result.get("storage_status", "unknown")
+    storage_icon = source_icons.get(storage, "?")
 
-    footer = [
-        "---",
-        "",
-        "> *«Системи не замінюють людей, вони дають людям можливість бути ефективнішими.»*",
-    ]
+    lines.append(f"*SECRETARY\\_HANDOFF:* {storage_icon} {n_written} нових записів")
+    if n_priority:
+        lines.append(f"  ‼️ у т.ч. {n_priority} пріоритетних")
+    if n_skipped:
+        lines.append(f"  ↩ {n_skipped} дублів пропущено")
+    if handoff_result.get("error"):
+        lines.append(f"  ⚠️ Помилка: `{str(handoff_result['error'])[:100]}`")
 
-    parts = header + [s for s in sections if s] + footer
-    return "\n".join(parts)
+    lines.append("")
+    window_date = window_start[:10] if len(window_start) >= 10 else window_start
+    lines.append(f"_Вікно: {window_date} → {now:%Y\\-%m\\-%d}_")
+    lines.append("_Брифінг формує Secretary після читання handoff\\._")
+
+    return "\n".join(lines)
 
 
-def save_briefing(text: str, output_dir: str) -> Path:
-    """Зберігає брифінг у файл ``briefing_YYYY-MM-DD.md`` та повертає шлях."""
-    out_dir = _ROOT / output_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"briefing_{datetime.now():%Y-%m-%d}.md"
-    out_path.write_text(text, encoding="utf-8")
-    return out_path
+def _print_stdout_stats(
+    collected: CollectedData,
+    handoff_result: dict,
+    window_start: str,
+    started_at: str,
+    finished_at: str,
+) -> None:
+    """Детальна статистика у консоль (прапор --stdout)."""
+    sep = "=" * 62
+    print(f"\n{sep}")
+    print("  СТАТИСТИКА — Abacus Handoff Pipeline")
+    print(sep)
+    print(f"  run_id       : {collected.run_id}")
+    print(f"  started_at   : {started_at}")
+    print(f"  finished_at  : {finished_at}")
+    print(f"  window_start : {window_start}")
+    print(f"  overall      : {collected.overall_status()}")
+    print()
+    print("  Джерела:")
+    for src, res in collected.sources.items():
+        err = f" | {res.error}" if res.error else ""
+        print(f"    {src:<14}: {res.status} ({len(res.records)} записів){err}")
+    print()
+    print("  SECRETARY_HANDOFF:")
+    print(f"    written      : {handoff_result.get('handoffs_written', 0)}")
+    print(f"    priority     : {handoff_result.get('priority_handoffs', 0)}")
+    print(f"    skipped_dup  : {handoff_result.get('handoffs_skipped_duplicate', 0)}")
+    print(f"    storage      : {handoff_result.get('storage_status')}")
+    print(f"    file         : {handoff_result.get('handoff_file', '—')}")
+    if handoff_result.get("error"):
+        print(f"    error        : {handoff_result['error']}")
+    print(sep)
 
+
+# ────────────────────────────────────────────────────────────
+# Головна логіка
+# ────────────────────────────────────────────────────────────
 
 def main() -> None:
-    """Точка входу: парсинг аргументів, збір даних, збереження, розсилка."""
-    parser = argparse.ArgumentParser(description="Щоденний брифінг Command Center")
+    """Точка входу оркестратора handoff-пайплайну."""
+    parser = argparse.ArgumentParser(
+        description="Abacus — handoff-пайплайн (фоновий технічний агент)"
+    )
     parser.add_argument("--config", help="Шлях до config.yaml", default=None)
-    parser.add_argument("--stdout", action="store_true", help="Вивести у консоль")
-    parser.add_argument("--no-drive", action="store_true", help="Не зберігати в Google Drive")
+    parser.add_argument(
+        "--stdout", action="store_true",
+        help="Вивести детальну статистику у консоль"
+    )
+    parser.add_argument(
+        "--no-drive", action="store_true",
+        help="Пропустити запис у Drive (режим тестування)"
+    )
     args = parser.parse_args()
 
-    # КРОК 1: Завантажити checkpoints з Google Drive (delta-only mode)
-    print("[→] Завантаження checkpoints з Google Drive...")
-    checkpoints_reader = CheckpointsReader()
-    checkpoints = checkpoints_reader.load_from_drive()
-    
-    if checkpoints:
-        print(f"[✓] Checkpoints завантажено (gmail: {checkpoints.get('gmail_last_success', 'N/A')})")
-    else:
-        print("[!] Checkpoints не завантажені, використовуємо defaults")
+    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    print(f"\n{'=' * 60}")
+    print(f"  Abacus — Handoff Pipeline [{started_at}]")
+    print(f"{'=' * 60}\n")
 
-    # КРОК 2: Генерувати брифінг
+    # ── КРОК 1: Конфігурація ─────────────────────────────────
     config = load_config(args.config)
-    briefing = build_briefing(config)
 
-    # КРОК 3: Зберегти локально
-    output_dir = config.get("general", {}).get("output_dir", "briefings")
-    path = save_briefing(briefing, output_dir)
-    print(f"[✓] Брифінг збережено локально: {path}")
-
-    # КРОК 4: Зберегти у Google Drive (daily/)
-    if not args.no_drive:
-        try:
-            print("[→] Збереження брифінгу в Google Drive...")
-            drive = DriveClient()
-            daily_folder_id = '1a0RJCRUXOBHf_75mm7Pu2cBIeKSXG3hN'  # ID папки daily/
-            filename = f"briefing_{datetime.now():%Y-%m-%d}.md"
-            
-            file_id = drive.write_file(briefing, filename, daily_folder_id)
-            
-            if file_id:
-                print(f"[✓] Брифінг збережено в Drive: daily/{filename}")
-            else:
-                print("[!] Не вдалося зберегти в Drive")
-        except Exception as exc:
-            print(f"[!] Помилка збереження в Drive: {exc}")
-
-    if args.stdout:
-        print("\n" + briefing)
-
-    # КРОК 5: Надсилання брифінгу у Telegram
-    delivery = config.get("delivery", {})
-    if delivery.get("send_telegram", True):
-        try:
-            from integrations.telegram_sender import send_briefing
-            header = f"📋 *Щоденний брифінг — {datetime.now():%d.%m.%Y}*\n\n"
-            ok = send_briefing(header + briefing)
-            if ok:
-                print("[✓] Брифінг надіслано у Telegram")
-            else:
-                print("[!] Не вдалося надіслати у Telegram (chat_id не відомий?)")
-        except Exception as exc:
-            print(f"[!] Помилка Telegram-надсилання: {exc}")
-    
-
-    # КРОК 6: Оновити checkpoints (Abacus — єдиний writer)
-    print("[→] Оновлення checkpoints...")
+    # ── КРОК 2: Checkpoints → window_start ───────────────────
+    print("[→] Завантаження checkpoints з Drive...")
     try:
-        writer = CheckpointsWriter()
-        sources = {
-            'gmail': True,
-            'calendar': True,
-            'tasks': True,
-            'researcher': briefing and 'МОЗ' in briefing,  # Якщо є дайджест МОЗ
-        }
-        status = 'success'
-        
-        if writer.update_checkpoints(sources, status):
-            # Логуємо успіх
-            now = datetime.now()
-            event = {
-                'time_utc': now.strftime('%H:%M'),
-                'task': 'daily_briefing',
-                'status': 'success',
-                'result': f'Gmail: OK, Calendar: OK, Tasks: OK, Researcher: {"OK" if sources["researcher"] else "skipped"}',
-                'file': f'daily/{filename}'
-            }
-            writer.append_to_automation_log(event)
-            print("[✓] Checkpoints та лог оновлено")
-        else:
-            print("[!] Не вдалося оновити checkpoints")
+        reader = CheckpointsReader()
+        checkpoints = reader.load_from_drive() or {}
     except Exception as exc:
-        print(f"[!] Помилка оновлення checkpoints: {exc}")
+        print(f"[!] Помилка читання checkpoints: {exc} → defaults")
+        checkpoints = {}
 
-    print("\n[✓] Усі операції завершено")
+    window_start = get_window_start(checkpoints)
+    print(f"[✓] window_start = {window_start}")
+
+    # ── КРОК 3: Collector — збір сирих даних ─────────────────
+    print("\n[→] Collector: збір даних з усіх джерел...")
+    try:
+        collected = collect_all(config, window_start)
+    except Exception as exc:
+        print(f"[✗] Критична помилка Collector: {exc}")
+        sys.exit(1)
+
+    print(f"[✓] Collector завершено: {collected.overall_status()}")
+
+    # ── КРОК 4: Handoff — дедуплікація → Drive ───────────────
+    if args.no_drive:
+        print("\n[⚠] --no-drive: Handoff пропущено (режим тестування)")
+        handoff_result: dict[str, Any] = {
+            "handoffs_written": 0,
+            "handoffs_skipped_duplicate": 0,
+            "storage_status": "skipped",
+            "handoff_file": f"handoff_{datetime.now():%Y-%m-%d}.jsonl",
+            "handoff_folder_id": None,
+            "priority_handoffs": 0,
+            "error": None,
+        }
+    else:
+        print("\n[→] Handoff: дедуплікація → класифікація → запис на Drive...")
+        try:
+            handoff_result = process_handoffs(collected)
+        except Exception as exc:
+            print(f"[✗] Критична помилка Handoff: {exc}")
+            handoff_result = {
+                "handoffs_written": 0,
+                "handoffs_skipped_duplicate": 0,
+                "storage_status": "failed",
+                "handoff_file": f"handoff_{datetime.now():%Y-%m-%d}.jsonl",
+                "handoff_folder_id": None,
+                "priority_handoffs": 0,
+                "error": str(exc),
+            }
+
+        print(
+            f"[✓] Handoff: written={handoff_result['handoffs_written']}, "
+            f"priority={handoff_result['priority_handoffs']}, "
+            f"skipped={handoff_result['handoffs_skipped_duplicate']}, "
+            f"status={handoff_result['storage_status']}"
+        )
+
+    finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # ── КРОКИ 5–6: Checkpoints + Automation Log ──────────────
+    writer: CheckpointsWriter | None = None
+
+    if not args.no_drive:
+        # КРОК 5: Оновити checkpoints
+        print("\n[→] Оновлення checkpoints...")
+        try:
+            writer = CheckpointsWriter()
+            sources_status = _sources_status_dict(collected)
+            overall_status = collected.overall_status()
+            if writer.update_checkpoints(sources_status, overall_status):
+                print("[✓] Checkpoints оновлено")
+            else:
+                print("[!] update_checkpoints повернув False")
+        except Exception as exc:
+            print(f"[!] Помилка оновлення checkpoints: {exc}")
+            writer = None
+
+        if writer is not None:
+            # КРОК 6a: Детальний лог прогону (handoff_runs.jsonl на Drive)
+            try:
+                run_detail = _build_run_detail(
+                    collected=collected,
+                    handoff_result=handoff_result,
+                    window_start=window_start,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+                if writer.log_handoff_run(run_detail):
+                    print("[✓] handoff_runs.jsonl оновлено")
+                else:
+                    print("[!] log_handoff_run повернув False")
+            except Exception as exc:
+                print(f"[!] Помилка log_handoff_run: {exc}")
+
+            # КРОК 6b: Рядок у зведеній таблиці automation_log.md
+            try:
+                overall = collected.overall_status()
+                storage = handoff_result.get("storage_status", "unknown")
+                if overall == "success" and storage in ("success", "skipped"):
+                    log_status = "success"
+                elif overall == "failed" or storage == "failed":
+                    log_status = "failed"
+                else:
+                    log_status = "partial"
+
+                sources_line = " | ".join(
+                    f"{s}:{r.status}({len(r.records)})"
+                    for s, r in collected.sources.items()
+                )
+                event = {
+                    "time_utc": datetime.now(timezone.utc).strftime("%H:%M"),
+                    "task": "handoff_pipeline",
+                    "status": log_status,
+                    "result": (
+                        f"written={handoff_result.get('handoffs_written', 0)}, "
+                        f"priority={handoff_result.get('priority_handoffs', 0)} | "
+                        f"{sources_line}"
+                    ),
+                    "file": handoff_result.get("handoff_file", "—"),
+                }
+                if writer.append_to_automation_log(event):
+                    print("[✓] automation_log.md оновлено")
+                else:
+                    print("[!] append_to_automation_log повернув False")
+            except Exception as exc:
+                print(f"[!] Помилка automation_log: {exc}")
+
+    # ── КРОК 7: Telegram summary ─────────────────────────────
+    delivery = config.get("delivery", {})
+    if delivery.get("send_telegram", True) and not args.no_drive:
+        print("\n[→] Надсилання Telegram summary...")
+        try:
+            from integrations.telegram_sender import send_briefing  # noqa: E402
+            summary = _build_telegram_summary(collected, handoff_result, window_start)
+            ok = send_briefing(summary)
+            if ok:
+                print("[✓] Telegram summary надіслано")
+            else:
+                print("[!] Telegram: не вдалося надіслати (chat_id не відомий?)")
+        except Exception as exc:
+            print(f"[!] Telegram помилка: {exc}")
+
+    # ── КРОК 8: Stdout-статистика (прапор --stdout) ──────────
+    if args.stdout:
+        _print_stdout_stats(
+            collected=collected,
+            handoff_result=handoff_result,
+            window_start=window_start,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    print(f"\n[✓] Abacus — Handoff Pipeline завершено [{finished_at}]\n")
 
 
 if __name__ == "__main__":

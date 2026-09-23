@@ -172,13 +172,69 @@ researcher_status: {"success" if sources.get('researcher') else "pending"}
             print(f"❌ Помилка логу: {e}")
             return False
     
+    def log_handoff_run(self, run_detail: dict) -> bool:
+        """
+        Записати повний структурований запис прогону у handoff_runs.jsonl.
+
+        Файл зберігається у Command Center поряд із checkpoints.md.
+        Кожен рядок — JSON-об'єкт одного прогону (JSONL-формат).
+
+        Args:
+            run_detail: {
+                run_id, trigger, produced_by, started_at, finished_at,
+                window_start, window_end,
+                overall_status, source_check_status,
+                analysis_status, storage_status, handoff_status,
+                sources_checked: {source: {status, records_count, error, ...}},
+                handoffs_written, handoffs_skipped_duplicate, priority_handoffs,
+                output_refs: {handoff_file, handoff_folder_id},
+                error,
+            }
+
+        Returns:
+            True якщо успішно записано, False — помилка.
+        """
+        import json
+
+        log_filename = "handoff_runs.jsonl"
+        try:
+            existing_file = self.drive.find_file(
+                log_filename,
+                self.COMMAND_CENTER_FOLDER_ID,
+            )
+
+            current_content: str = ""
+            if existing_file:
+                current_content = self.drive.read_file(existing_file["id"]) or ""
+
+            new_line = json.dumps(run_detail, ensure_ascii=False) + "\n"
+            updated = current_content + new_line
+
+            file_id = self.drive.write_file(
+                content=updated,
+                filename=log_filename,
+                parent_id=self.COMMAND_CENTER_FOLDER_ID,
+                mime_type="text/plain",
+            )
+
+            if file_id:
+                print(f"✅ handoff_runs.jsonl: {run_detail.get('run_id', '?')} записано")
+                return True
+            else:
+                print("❌ log_handoff_run: drive.write_file повернув None")
+                return False
+
+        except Exception as exc:
+            print(f"❌ log_handoff_run: {exc}")
+            return False
+
     def _generate_automation_log_header(self) -> str:
         """Генерувати header для automation_log.md"""
         return f"""# Automation Log
 
 **Останнє оновлення:** {self.timestamp} (UTC)
 
-Справжній час розпізнавання та результати кожного автоматичного прогону.
+Зведена таблиця прогонів Abacus. Детальна структура — `handoff_runs.jsonl`.
 
 ---
 
