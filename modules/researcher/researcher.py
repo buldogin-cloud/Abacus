@@ -240,13 +240,9 @@ class Researcher:
     def search_moz_updates(self, limit: int = 10) -> list[dict[str, Any]]:
         """Останні оновлення МОЗ: накази (aaukr) + новини (Google News).
 
-        Спершу пробуємо прямий сайт МОЗ; якщо Cloudflare блокує —
-        джерело позначається ``blocked``, і ми використовуємо резервні канали.
+        Прямий сайт МОЗ за Cloudflare — не перевіряємо, використовуємо
+        тільки джерела що реально доступні (aaukr + Google News).
         """
-        # Спроба прямого доступу — лише щоб зафіксувати реальний статус сайту.
-        _, direct_status = self._fetch(MOZ_NEWS_URL)
-        self.source_status["МОЗ (сайт)"] = direct_status
-
         results = self.search_moz_orders(limit=limit)
         news = self.search_google_news(
             "site:moz.gov.ua", source="МОЗ (новини)", limit=limit
@@ -261,8 +257,6 @@ class Researcher:
 
     def search_nszu_updates(self, limit: int = 10) -> list[dict[str, Any]]:
         """Останні оновлення НСЗУ через Google News (сайт за Cloudflare)."""
-        _, direct_status = self._fetch(NSZU_NEWS_URL)
-        self.source_status["НСЗУ (сайт)"] = direct_status
         return self.search_google_news(
             "site:nszu.gov.ua", source="НСЗУ", limit=limit
         )
@@ -275,9 +269,6 @@ class Researcher:
         Фільтруємо за медичними ключовими словами, щоб не тонути у всіх
         актах уряду.
         """
-        _, direct_status = self._fetch(KMU_NPAS_URL)
-        self.source_status["КМУ (портал)"] = direct_status
-
         # Google News з медичним фокусом.
         med_query = (
             "site:kmu.gov.ua постанова (охорона здоров'я OR медичн OR "
