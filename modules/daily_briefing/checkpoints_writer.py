@@ -11,7 +11,7 @@ class CheckpointsWriter:
     """Писач checkpoints у Google Drive (Abacus)"""
     
     # ID папки Command Center (де у нас є права на запис)
-    COMMAND_CENTER_FOLDER_ID = '1eh47d2AtLZwfuYdthzVfJ-5pz_x2Qgf5'
+    COMMAND_CENTER_FOLDER_ID = '1tmeJKjy_P-T38AKXHv9LtdjjqOFf4lgl'  # handoffs folder (drive.file scope)
     CHECKPOINT_FILE_NAME = 'checkpoints.md'
     AUTOMATION_LOG_FILE_NAME = 'automation_log.md'
     

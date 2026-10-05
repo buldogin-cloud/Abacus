@@ -11,7 +11,7 @@ class CheckpointsReader:
     """Читач checkpoints з Google Drive"""
     
     # ID папок у Command Center (hardcoded для стабільності)
-    COMMAND_CENTER_ID = '1eh47d2AtLZwfuYdthzVfJ-5pz_x2Qgf5'
+    COMMAND_CENTER_ID = '1tmeJKjy_P-T38AKXHv9LtdjjqOFf4lgl'  # handoffs folder (drive.file scope)
     CADENCE_FOLDER_ID = '1FsfbDWu9mxRSVWr72SaxMVz4YAVv49zE'
     
     def __init__(self):

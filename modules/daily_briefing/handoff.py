@@ -40,7 +40,9 @@ from modules.daily_briefing.collector import CollectedData, SourceResult
 # ────────────────────────────────────────────────────────────
 
 # ID папки Command Center у Drive
-COMMAND_CENTER_FOLDER_ID = "1eh47d2AtLZwfuYdthzVfJ-5pz_x2Qgf5"
+COMMAND_CENTER_FOLDER_ID = "1eh47d2AtLZwfuYdthzVfJ-5pz_x2Qgf5"  # оригінальна тека (недоступна через drive.file)
+HANDOFFS_FOLDER_ID = "1tmeJKjy_P-T38AKXHv9LtdjjqOFf4lgl"   # пряме посилання на handoffs
+SECRETARY_FOLDER_ID = "1X9GvVOAo9iIWHrrua0Un6S9ytiScpEmj"   # пряме посилання на secretary
 
 # ID реєстру завдань Secretary (ТІЛЬКИ ЧИТАННЯ для Abacus)
 TASKS_REGISTRY_SHEET_ID = "11oqxqRm7cAH6jpKf9T7CYtIY0j01LAV259F7NGkd5so"

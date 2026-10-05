@@ -1,114 +1,180 @@
-"""Інтеграція з Gmail API.
+"""Інтеграція з Gmail через IMAP/SMTP.
 
-Клас :class:`GmailClient` надає зручні методи для отримання непрочитаних
-та важливих листів, а також для надсилання повідомлень. Використовується
-модулем щоденного брифінгу.
+Клас GmailClient надає методи для отримання непрочитаних та важливих листів
+(через IMAP), а також для надсилання повідомлень (через SMTP).
+
+Використовує App Password замість OAuth — токен ніколи не помирає.
 """
 
-from __future__ import annotations
-
-import base64
+import os
+import smtplib
 from datetime import datetime, timedelta
+from email import message_from_bytes, message_from_string
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Any
-
-from googleapiclient.discovery import build
-
-from .google_auth import get_credentials
+import imaplib
 
 
 class GmailClient:
-    """Клієнт для роботи з поштовою скринькою через Gmail API."""
+    """Клієнт для роботи з Gmail через IMAP/SMTP (без OAuth)."""
+
+    IMAP_HOST = "imap.gmail.com"
+    IMAP_PORT = 993
+    SMTP_HOST = "smtp.gmail.com"
+    SMTP_PORT = 587
+    EMAIL = "andrewbelin6@gmail.com"
 
     def __init__(self, user_id: str = "me") -> None:
-        """Ініціалізує сервіс Gmail.
+        """Ініціалізує IMAP/SMTP клієнт для Gmail.
 
-        :param user_id: ідентифікатор користувача Gmail ("me" — поточний).
+        :param user_id: ігнорується (для сумісності з API)
         """
         self.user_id = user_id
-        creds = get_credentials()
-        self.service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-
-    # ------------------------------------------------------------------ #
-    # Внутрішні допоміжні методи
-    # ------------------------------------------------------------------ #
-    def _list_message_ids(self, query: str, max_results: int = 25) -> list[str]:
-        """Повертає ID листів за пошуковим запитом Gmail."""
-        response = (
-            self.service.users()
-            .messages()
-            .list(userId=self.user_id, q=query, maxResults=max_results)
-            .execute()
-        )
-        return [m["id"] for m in response.get("messages", [])]
-
-    def _get_message_summary(self, message_id: str) -> dict[str, Any]:
-        """Повертає стислу інформацію про лист: відправник, тема, дата, фрагмент."""
-        msg = (
-            self.service.users()
-            .messages()
-            .get(
-                userId=self.user_id,
-                id=message_id,
-                format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
+        self.email = self.EMAIL
+        self.app_password = self._get_app_password()
+        if not self.app_password:
+            raise RuntimeError(
+                "App Password не знайдено. Встанови GMAIL_APP_PASSWORD у змінну оточення "
+                "або збереги у /home/ubuntu/gmail_app_password.txt"
             )
-            .execute()
-        )
-        headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
-        return {
-            "id": message_id,
-            "from": headers.get("From", "(невідомо)"),
-            "subject": headers.get("Subject", "(без теми)"),
-            "date": headers.get("Date", ""),
-            "snippet": msg.get("snippet", ""),
-            "labels": msg.get("labelIds", []),
-        }
+        self.imap = None
+
+    def _get_app_password(self) -> str | None:
+        """Отримує Google App Password з oточення або файлу."""
+        pwd = os.getenv("GMAIL_APP_PASSWORD")
+        if pwd:
+            return pwd
+        fpath = "/home/ubuntu/gmail_app_password.txt"
+        if os.path.exists(fpath):
+            with open(fpath) as f:
+                return f.read().strip()
+        return None
+
+    def _connect_imap(self):
+        """Підключається до IMAP (lazy connection)."""
+        if self.imap is None:
+            self.imap = imaplib.IMAP4_SSL(self.IMAP_HOST, self.IMAP_PORT)
+            self.imap.login(self.email, self.app_password)
+
+    def _disconnect_imap(self):
+        """Відключається від IMAP."""
+        if self.imap:
+            try:
+                self.imap.close()
+            except:
+                pass
+            self.imap = None
+
+    def _list_message_ids(self, query: str, max_results: int = 25) -> list[str]:
+        """Повертає UID листів за пошуком IMAP."""
+        try:
+            self._connect_imap()
+            self.imap.select("INBOX")
+            # IMAP SEARCH за стандартними критеріями
+            status, uids = self.imap.search(None, query)
+            if status == "OK" and uids[0]:
+                uid_list = uids[0].split()[-max_results:]  # останні (найновіші)
+                return [u.decode() if isinstance(u, bytes) else u for u in uid_list]
+            return []
+        except Exception as e:
+            print(f"Помилка IMAP search: {e}")
+            self._disconnect_imap()
+            return []
+
+    def _get_message_summary(self, uid: str) -> dict[str, Any]:
+        """Повертає стислу інформацію про лист."""
+        try:
+            self._connect_imap()
+            status, data = self.imap.fetch(uid, "(RFC822)")
+            if status != "OK":
+                return {}
+            
+            msg = message_from_bytes(data[0][1])
+            from_addr = msg.get("From", "Unknown")
+            subject = msg.get("Subject", "(no subject)")
+            date_str = msg.get("Date", "Unknown")
+            
+            # Витягнути перший текстовий фрагмент
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                        break
+            else:
+                body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+            
+            snippet = body[:200] if body else "(empty)"
+            
+            return {
+                "id": uid,
+                "from": from_addr,
+                "subject": subject,
+                "date": date_str,
+                "snippet": snippet,
+            }
+        except Exception as e:
+            print(f"Помилка при читанні листа {uid}: {e}")
+            return {}
 
     # ------------------------------------------------------------------ #
-    # Публічний інтерфейс
+    # Публічні методи
     # ------------------------------------------------------------------ #
     def get_unread_messages(self, days: int = 1, max_results: int = 25) -> list[dict[str, Any]]:
-        """Повертає непрочитані листи за останні ``days`` днів.
-
-        :param days: скільки останніх днів охопити.
-        :param max_results: максимальна кількість листів.
-        """
-        after = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
-        query = f"is:unread after:{after}"
-        ids = self._list_message_ids(query, max_results=max_results)
-        return [self._get_message_summary(mid) for mid in ids]
+        """Повертає непрочитані листи за останні N днів."""
+        try:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
+            # IMAP критерій: UNSEEN (непрочитані) та SINCE (після дати)
+            query = f'UNSEEN SINCE {cutoff}'
+            uids = self._list_message_ids(query, max_results)
+            
+            result = []
+            for uid in uids:
+                msg_data = self._get_message_summary(uid)
+                if msg_data:
+                    result.append(msg_data)
+            return result
+        except Exception as e:
+            print(f"Помилка get_unread_messages: {e}")
+            return []
 
     def get_important_messages(self, days: int = 1, max_results: int = 25) -> list[dict[str, Any]]:
-        """Повертає важливі листи (позначені Gmail як important) за ``days`` днів."""
-        after = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
-        query = f"is:important after:{after}"
-        ids = self._list_message_ids(query, max_results=max_results)
-        return [self._get_message_summary(mid) for mid in ids]
+        """Повертає важливі листи за останні N днів."""
+        try:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
+            # IMAP критерій: FLAGGED (важливі)
+            query = f'FLAGGED SINCE {cutoff}'
+            uids = self._list_message_ids(query, max_results)
+            
+            result = []
+            for uid in uids:
+                msg_data = self._get_message_summary(uid)
+                if msg_data:
+                    result.append(msg_data)
+            return result
+        except Exception as e:
+            print(f"Помилка get_important_messages: {e}")
+            return []
 
     def send_message(self, to: str, subject: str, body: str) -> dict[str, Any]:
-        """Надсилає текстовий лист.
+        """Надсилає лист через SMTP."""
+        try:
+            msg = MIMEText(body, "plain", "utf-8")
+            msg["Subject"] = subject
+            msg["From"] = self.email
+            msg["To"] = to
+            
+            with smtplib.SMTP(self.SMTP_HOST, self.SMTP_PORT) as server:
+                server.starttls()
+                server.login(self.email, self.app_password)
+                server.send_message(msg)
+            
+            return {"id": f"sent-{datetime.now().isoformat()}", "labelIds": ["SENT"]}
+        except Exception as e:
+            print(f"Помилка при надсиланні: {e}")
+            raise
 
-        :param to: адреса отримувача.
-        :param subject: тема листа.
-        :param body: текст листа (plain text).
-        :return: відповідь Gmail API про надісланий лист.
-        """
-        message = MIMEText(body, _charset="utf-8")
-        message["to"] = to
-        message["subject"] = subject
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
-        return (
-            self.service.users()
-            .messages()
-            .send(userId=self.user_id, body={"raw": raw})
-            .execute()
-        )
-
-
-if __name__ == "__main__":
-    # Проста ручна перевірка роботи клієнта.
-    client = GmailClient()
-    print("Непрочитані листи за 24 години:")
-    for m in client.get_unread_messages(days=1):
-        print(f"  • {m['from']} — {m['subject']}")
+    def __del__(self):
+        """Закриває IMAP при видаленні об'єкта."""
+        self._disconnect_imap()

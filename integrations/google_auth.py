@@ -1,15 +1,10 @@
-"""Спільна автентифікація Google API (OAuth 2.0).
+"""Інтеграція з Google API.
 
-Модуль надає єдину функцію отримання облікових даних (credentials) для
-всіх Google-сервісів: Gmail, Calendar, Sheets. Токени зберігаються у
-``token.json`` та автоматично оновлюються.
+Функція :func:`get_credentials` управляє авторизацією для сервісів Google.
+Використовується модулями, які потребують доступу до Drive, Calendar, Tasks.
 
-Порядок пошуку облікових даних:
-1. Змінні середовища ``GOOGLE_CREDENTIALS`` / ``GOOGLE_TOKEN`` (для CI).
-2. Локальні файли ``credentials.json`` / ``token.json``.
+ВАЖЛИВО: Gmail більше не використовує OAuth (перейшов на IMAP/SMTP з App Password).
 """
-
-from __future__ import annotations
 
 import json
 import os
@@ -20,74 +15,78 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# Області доступу (scopes) для всіх сервісів Command Center.
-# ВАЖЛИВО: цей перелік має точно відповідати scopes в authorize.py,
-# інакше при оновленні токена частина дозволів «губиться» (token.json
-# перезаписується лише з переліченими тут scopes).
+# Шляхи до файлів
+REPO_ROOT = Path(__file__).parent.parent
+CREDENTIALS_FILE = REPO_ROOT / "credentials.json"
+TOKEN_FILE = REPO_ROOT / "token.json"
+
+# Області доступу (scopes) для Google сервісів (БЕЗ Gmail - він тепер використовує IMAP).
+# ВАЖЛИВО: цей перелік має точно відповідати scopes в authorize.py.
 DEFAULT_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.file",  # Лишень файли, створені застосунком
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-# Шляхи за замовчуванням (корінь проекту).
-_ROOT = Path(__file__).resolve().parent.parent
-CREDENTIALS_FILE = os.environ.get("CREDENTIALS_FILE", str(_ROOT / "credentials.json"))
-TOKEN_FILE = os.environ.get("TOKEN_FILE", str(_ROOT / "token.json"))
-
 
 def _load_token_from_env(scopes: Iterable[str]) -> Credentials | None:
-    """Завантажує токен зі змінної середовища ``GOOGLE_TOKEN`` (для CI)."""
-    raw = os.environ.get("GOOGLE_TOKEN")
-    if not raw:
+    """Завантажує токен із змінної оточення GOOGLE_TOKEN (GitHub Actions)."""
+    token_json = os.getenv("GOOGLE_TOKEN")
+    if not token_json:
         return None
-    info = json.loads(raw)
-    return Credentials.from_authorized_user_info(info, list(scopes))
-
-
-def _write_credentials_from_env() -> None:
-    """Записує ``credentials.json`` зі змінної середовища, якщо потрібно (CI)."""
-    raw = os.environ.get("GOOGLE_CREDENTIALS")
-    if raw and not Path(CREDENTIALS_FILE).exists():
-        Path(CREDENTIALS_FILE).write_text(raw, encoding="utf-8")
+    try:
+        info = json.loads(token_json)
+        return Credentials.from_authorized_user_info(info, list(scopes))
+    except Exception as e:
+        print(f"Помилка завантаження токена з GOOGLE_TOKEN: {e}")
+        return None
 
 
 def get_credentials(scopes: Iterable[str] | None = None) -> Credentials:
-    """Повертає дійсні облікові дані Google API.
+    """Отримує валідні Google API credentails.
 
-    Якщо збережений токен відсутній або недійсний — ініціює OAuth-потік
-    (відкриває браузер у локальному середовищі). У CI очікує наявність
-    змінних середовища ``GOOGLE_TOKEN`` / ``GOOGLE_CREDENTIALS``.
+    Порядок пошуку:
+    1. Змінна оточення GOOGLE_TOKEN (GitHub Actions)
+    2. Локальний файл token.json
+    3. Інтерактивна авторизація (для розробки)
+
+    :param scopes: Список областей доступу. За замовчуванням — DEFAULT_SCOPES.
+    :return: Об'єкт Credentials для використання з Google API.
     """
     scopes = list(scopes or DEFAULT_SCOPES)
-    creds: Credentials | None = None
 
-    # 1. Спроба зчитати токен зі змінної середовища (CI).
+    # 1. Спроба завантажити з環境
     creds = _load_token_from_env(scopes)
+    if creds and creds.valid:
+        return creds
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        return creds
 
-    # 2. Спроба зчитати локальний token.json.
-    if creds is None and Path(TOKEN_FILE).exists():
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, scopes)
+    # 2. Спроба завантажити з локального файлу
+    if TOKEN_FILE.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, scopes)
+            if creds.valid:
+                return creds
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                return creds
+        except Exception as e:
+            print(f"Помилка завантаження token.json: {e}")
 
-    # 3. Оновлення або інтерактивна авторизація.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            _write_credentials_from_env()
-            if not Path(CREDENTIALS_FILE).exists():
-                raise FileNotFoundError(
-                    "Не знайдено credentials.json. Створіть OAuth Client ID у "
-                    "Google Cloud Console та збережіть файл у корені проекту, "
-                    "або задайте змінну середовища GOOGLE_CREDENTIALS."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, scopes)
-            creds = flow.run_local_server(port=0)
+    # 3. Інтерактивна авторизація (розробка)
+    if not CREDENTIALS_FILE.exists():
+        raise RuntimeError(
+            f"Файл {CREDENTIALS_FILE} не знайдено. "
+            "Завантажте OAuth credentials.json з Google Cloud Console."
+        )
 
-        # Зберігаємо оновлений токен для наступних запусків.
-        Path(TOKEN_FILE).write_text(creds.to_json(), encoding="utf-8")
+    flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, scopes)
+    creds = flow.run_local_server(port=8765)
+
+    # Зберігаємо для наступного разу
+    with open(TOKEN_FILE, "w") as token:
+        token.write(creds.to_json())
 
     return creds
