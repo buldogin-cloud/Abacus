@@ -40,6 +40,11 @@ class SourceResult:
     window_end: str        # ISO UTC — до якого часу перевіряли
     records: list[dict]    # нормалізовані записи
     error: str | None = None
+    # Технічне підтвердження, що з'єднання з джерелом реально встановлено.
+    # Req 1: нуль знайдених записів НЕ є доказом справної роботи — має бути
+    # окреме підтвердження підключення (IMAP login / API ping).
+    connection_verified: bool = False
+    meta: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -107,6 +112,23 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
             error=str(exc),
         )
 
+    # Req 1: ЯВНО підтверджуємо підключення (IMAP login + SELECT INBOX).
+    # Без цього «0 листів» може насправді означати збій логіну, а не порожню скриньку.
+    try:
+        gmail.verify_connection()
+        connection_verified = True
+    except Exception as exc:
+        return SourceResult(
+            source="gmail",
+            status="failed",
+            checked_at=checked_at,
+            window_start=window_start,
+            window_end=checked_at,
+            records=[],
+            error=f"IMAP-підключення не підтверджено: {exc}",
+            connection_verified=False,
+        )
+
     records = []
     seen_ids: set[str] = set()
 
@@ -122,6 +144,7 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
             window_end=checked_at,
             records=[],
             error=str(exc),
+            connection_verified=connection_verified,
         )
 
     for msg in unread + important:
@@ -148,6 +171,11 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
             "has_attachments": bool(msg.get("attachments")),
             "attachment_types": [a.get("type", "") for a in msg.get("attachments", [])],
             "snippet": (msg.get("snippet") or "")[:200],
+            # Req 2: factual_summary не має бути порожнім. Для листа —
+            # це тема + перший фрагмент тексту (фактичний зміст, без інтерпретації).
+            "factual_summary": (
+                f"{msg.get('subject', '').strip()} — {(msg.get('snippet') or '').strip()}"
+            ).strip(" —") or (msg.get("subject", "").strip()),
             "category_guess": category_guess,
             "is_unread": msg in unread,
             "is_important": msg in important,
@@ -165,6 +193,7 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
         window_start=window_start,
         window_end=checked_at,
         records=records,
+        connection_verified=connection_verified,
     )
 
 
@@ -249,15 +278,21 @@ def collect_calendar(cfg: dict[str, Any], window_start: str) -> SourceResult:
             continue
         seen_ids.add(event_id)
 
+        title = event.get("summary", "").strip()
+        start = event.get("start", "")
+        location = event.get("location", "").strip()
+        # Req 2: непорожній factual_summary для кожної події.
+        fs_parts = [p for p in [title, f"початок: {start}" if start else "", location] if p]
         record = {
             "source": "calendar",
             "source_id": event_id,
             "detected_at": checked_at,
-            "title": event.get("summary", ""),
-            "start": event.get("start", ""),
+            "title": title,
+            "factual_summary": " | ".join(fs_parts) if fs_parts else title,
+            "start": start,
             "end": event.get("end", ""),
             "all_day": event.get("all_day", False),
-            "location": event.get("location", ""),
+            "location": location,
             "description": (event.get("description") or "")[:300],
             "is_today": event in today,
         }
@@ -270,6 +305,7 @@ def collect_calendar(cfg: dict[str, Any], window_start: str) -> SourceResult:
         window_start=window_start,
         window_end=checked_at,
         records=records,
+        connection_verified=True,
     )
 
 
@@ -343,6 +379,7 @@ def collect_tasks(cfg: dict[str, Any], window_start: str) -> SourceResult:
         window_start=window_start,
         window_end=checked_at,
         records=records,
+        connection_verified=True,
     )
 
 
@@ -403,24 +440,34 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
     for item in all_items:
         human_src = item.get("source", "")
         title = item.get("title", "")
+        order_no = item.get("order_no", "")
+        doc_date = item.get("date", "") or item.get("published", "")
         # Номер+дата наказу (з aaukr) додаємо у заголовок для наочності.
         display_title = title
-        if item.get("order_no"):
-            display_title = f"№{item['order_no']} від {item.get('date','')} — {title}"
+        if order_no:
+            display_title = f"№{order_no} від {doc_date} — {title}"
+        # Req 2: source_verified=true дозволено ЛИШЕ після перевірки офіційного
+        # документа/сторінки відповідного органу. google_news та пошукові
+        # сторінки — НЕ першоджерела. Дзеркало aaukr — теж не офіційне джерело.
+        # Тому на етапі фонового збору ЗАВЖДИ false; підтвердження робить
+        # окремий крок обробки нормативних документів (handoff → radar).
         records.append({
             "source": _primary_source(human_src),
-            "source_id": item.get("url", "") or title,
+            "source_id": item.get("url", "") or (f"norm:{order_no}|{doc_date}" if order_no else title),
             "detected_at": checked_at,
             "title": display_title,
+            # Req 2: непорожній factual_summary (фактичний заголовок документа).
+            "factual_summary": display_title,
             "url": item.get("url", ""),
-            "published_at": item.get("date", "") or item.get("published", ""),
-            "factual_summary": "",
-            "document_type": "наказ" if item.get("order_no") else "новина",
+            "published_at": doc_date,
+            "order_no": order_no,
+            "doc_date": doc_date,
+            "document_type": "наказ" if order_no else "новина",
             "change_status": "NEW",  # буде уточнено дедуплікатором
             "primary_source": _primary_source(human_src),
             "source_channel": item.get("via", ""),  # google_news / aaukr / rss
             "source_label": human_src,
-            "source_verified": item.get("via") == "aaukr",  # напряму з дзеркала
+            "source_verified": False,  # Req 2: ніколи true без перевірки офіц. джерела
             "potential_impact_areas": _guess_impact_areas(title),
         })
 
@@ -435,6 +482,9 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
     if blocked_sources:
         error_note = "Заблоковано (Cloudflare): " + ", ".join(blocked_sources)
 
+    # connection_verified: хоча б одне джерело реально відповіло (ok/empty).
+    any_reachable = any(st in ("ok", "empty") for st in source_status.values())
+
     result = SourceResult(
         source="researcher",
         status=status,
@@ -443,6 +493,8 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
         window_end=checked_at,
         records=records,
         error=error_note,
+        connection_verified=any_reachable,
+        meta={"source_status": source_status},
     )
     # Додаємо статуси джерел як метадані (для логів/дайджесту Secretary).
     result.source_status = source_status  # type: ignore[attr-defined]

@@ -28,7 +28,10 @@ class CheckpointsReader:
         """
         try:
             # Знаходимо файл checkpoints.md
-            file = self.drive.find_file('checkpoints.md', self.CADENCE_FOLDER_ID)
+            # Req 7: читаємо з тієї самої теки, куди пише CheckpointsWriter
+            # (handoffs folder). Раніше тут був CADENCE_FOLDER_ID — через це
+            # Reader читав не той файл і delta-вікно ламалося.
+            file = self.drive.find_file('checkpoints.md', self.COMMAND_CENTER_ID)
             
             if not file:
                 print("⚠️ Файл checkpoints.md не знайдено, використовуємо defaults")

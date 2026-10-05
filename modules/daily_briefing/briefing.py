@@ -44,6 +44,7 @@ from modules.daily_briefing.checkpoints_util import CheckpointsReader    # noqa:
 from modules.daily_briefing.checkpoints_writer import CheckpointsWriter  # noqa: E402
 from modules.daily_briefing.collector import CollectedData, collect_all  # noqa: E402
 from modules.daily_briefing.handoff import process_handoffs              # noqa: E402
+from modules.daily_briefing.radar import process_radar                   # noqa: E402
 
 
 # ────────────────────────────────────────────────────────────
@@ -170,13 +171,23 @@ def _build_run_detail(
         # Результати handoff
         "handoffs_written": handoff_result.get("handoffs_written", 0),
         "handoffs_skipped_duplicate": handoff_result.get("handoffs_skipped_duplicate", 0),
+        "invalid_dropped": handoff_result.get("invalid_dropped", 0),
+        "skipped_non_handoff": handoff_result.get("skipped_non_handoff", 0),
         "priority_handoffs": handoff_result.get("priority_handoffs", 0),
+        "classification_counts": handoff_result.get("classification_counts", {}),
+        "readback_confirmed": handoff_result.get("readback_confirmed", 0),
+        "readback_ok": handoff_result.get("readback_ok", False),
+        "radar_rows_total": handoff_result.get("radar_rows_total", 0),
+        "radar_rows_added": handoff_result.get("radar_rows_added", 0),
+        "radar_rows_updated": handoff_result.get("radar_rows_updated", 0),
+        "radar_status": handoff_result.get("radar_status", "unknown"),
         # Посилання на файли
         "output_refs": {
             "handoff_file": handoff_result.get("handoff_file", ""),
             "handoff_folder_id": handoff_result.get("handoff_folder_id", ""),
         },
-        # Помилки
+        # Помилки / необроблене (Req 8)
+        "errors": handoff_result.get("errors", []),
         "error": handoff_result.get("error"),
     }
 
@@ -230,6 +241,30 @@ def _build_telegram_summary(
         lines.append(f"  ‼️ у т.ч. {n_priority} пріоритетних")
     if n_skipped:
         lines.append(f"  ↩ {n_skipped} дублів пропущено")
+    n_invalid = handoff_result.get("invalid_dropped", 0)
+    if n_invalid:
+        lines.append(f"  🗑 {n_invalid} неповних відкинуто")
+
+    cc = handoff_result.get("classification_counts", {}) or {}
+    if any(cc.values()):
+        lines.append(
+            f"  🧩 new\\_task: {cc.get('new_task', 0)} / "
+            f"update: {cc.get('update_existing', 0)} / "
+            f"info: {cc.get('info_only', 0)} / "
+            f"review: {cc.get('needs_review', 0)}"
+        )
+
+    rb_ok = handoff_result.get("readback_ok", False)
+    rb_icon = "✅" if rb_ok else "⚠️"
+    lines.append(f"  {rb_icon} read\\-back: {handoff_result.get('readback_confirmed', 0)} підтверджено")
+
+    radar_total = handoff_result.get("radar_rows_total", 0)
+    radar_added = handoff_result.get("radar_rows_added", 0)
+    if radar_total or radar_added:
+        lines.append(
+            f"  📑 Радар норм\\. док\\.: +{radar_added} нових, всього {radar_total}"
+        )
+
     if handoff_result.get("error"):
         lines.append(f"  ⚠️ Помилка: `{str(handoff_result['error'])[:100]}`")
 
@@ -262,16 +297,35 @@ def _print_stdout_stats(
     print("  Джерела:")
     for src, res in collected.sources.items():
         err = f" | {res.error}" if res.error else ""
-        print(f"    {src:<14}: {res.status} ({len(res.records)} записів){err}")
+        conn = "conn:ok" if getattr(res, "connection_verified", False) else "conn:НЕ ПІДТВ."
+        print(f"    {src:<14}: {res.status} ({len(res.records)} записів) [{conn}]{err}")
     print()
+    cc = handoff_result.get("classification_counts", {}) or {}
     print("  SECRETARY_HANDOFF:")
-    print(f"    written      : {handoff_result.get('handoffs_written', 0)}")
-    print(f"    priority     : {handoff_result.get('priority_handoffs', 0)}")
-    print(f"    skipped_dup  : {handoff_result.get('handoffs_skipped_duplicate', 0)}")
-    print(f"    storage      : {handoff_result.get('storage_status')}")
-    print(f"    file         : {handoff_result.get('handoff_file', '—')}")
+    print(f"    written          : {handoff_result.get('handoffs_written', 0)}")
+    print(f"    priority         : {handoff_result.get('priority_handoffs', 0)}")
+    print(f"    skipped_dup      : {handoff_result.get('handoffs_skipped_duplicate', 0)}")
+    print(f"    invalid_dropped  : {handoff_result.get('invalid_dropped', 0)}")
+    print(f"    skip_registry    : {handoff_result.get('skipped_non_handoff', 0)}")
+    print(f"    classification   : new_task={cc.get('new_task', 0)}, "
+          f"update_existing={cc.get('update_existing', 0)}, "
+          f"info_only={cc.get('info_only', 0)}, needs_review={cc.get('needs_review', 0)}")
+    print(f"    readback_ok      : {handoff_result.get('readback_ok', False)} "
+          f"({handoff_result.get('readback_confirmed', 0)} підтверджено)")
+    print(f"    storage          : {handoff_result.get('storage_status')}")
+    print(f"    file             : {handoff_result.get('handoff_file', '—')}")
+    print("  РАДАР нормативних док.:")
+    print(f"    rows_total       : {handoff_result.get('radar_rows_total', 0)}")
+    print(f"    added/updated    : {handoff_result.get('radar_rows_added', 0)}"
+          f"/{handoff_result.get('radar_rows_updated', 0)}")
+    print(f"    radar_status     : {handoff_result.get('radar_status', '—')}")
+    errs = handoff_result.get("errors", []) or []
+    if errs:
+        print(f"    errors/unproc.   : {len(errs)}")
+        for e in errs[:10]:
+            print(f"        - {e}")
     if handoff_result.get("error"):
-        print(f"    error        : {handoff_result['error']}")
+        print(f"    error            : {handoff_result['error']}")
     print(sep)
 
 
@@ -360,25 +414,86 @@ def main() -> None:
             f"status={handoff_result['storage_status']}"
         )
 
+    # ── КРОК 4b: Радар нормативних документів (Req 5) ─────────
+    if args.no_drive:
+        radar_result: dict[str, Any] = {
+            "radar_rows_total": 0, "radar_rows_added": 0, "radar_rows_updated": 0,
+            "radar_status": "skipped", "readback_ok": True,
+            "radar_file": "radar_normative.jsonl", "error": None,
+        }
+    else:
+        print("\n[→] Радар: обробка нормативних документів...")
+        try:
+            radar_result = process_radar(collected)
+        except Exception as exc:
+            print(f"[✗] Помилка радара: {exc}")
+            radar_result = {
+                "radar_rows_total": 0, "radar_rows_added": 0, "radar_rows_updated": 0,
+                "radar_status": "failed", "readback_ok": False,
+                "radar_file": "radar_normative.jsonl", "error": str(exc),
+            }
+        print(
+            f"[✓] Радар: +{radar_result['radar_rows_added']} нових, "
+            f"~{radar_result['radar_rows_updated']} оновлено, "
+            f"всього {radar_result['radar_rows_total']}, "
+            f"status={radar_result['radar_status']}"
+        )
+
+    # Зводимо радар у handoff_result, щоб summary/лог бачили його (Req 8).
+    handoff_result["radar_rows_total"] = radar_result.get("radar_rows_total", 0)
+    handoff_result["radar_rows_added"] = radar_result.get("radar_rows_added", 0)
+    handoff_result["radar_rows_updated"] = radar_result.get("radar_rows_updated", 0)
+    handoff_result["radar_status"] = radar_result.get("radar_status", "unknown")
+    if radar_result.get("error"):
+        handoff_result.setdefault("errors", []).append(f"radar: {radar_result['error']}")
+
     finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     # ── КРОКИ 5–6: Checkpoints + Automation Log ──────────────
     writer: CheckpointsWriter | None = None
 
     if not args.no_drive:
-        # КРОК 5: Оновити checkpoints
+        # КРОК 5: Оновити checkpoints.
+        # Req 7: checkpoint (вікно delta) просувається ЛИШЕ коли джерело реально
+        # перевірено, handoff валідний, запис відбувся і підтверджений read-back.
+        # Інакше ризик втрати даних: вікно зсунеться вперед, а записи не збережені.
+        storage_status = handoff_result.get("storage_status", "unknown")
+        readback_ok = handoff_result.get("readback_ok", False)
+        radar_status = handoff_result.get("radar_status", "unknown")
+        storage_fully_ok = (
+            storage_status == "success"
+            and readback_ok
+            and radar_status in ("success", "skipped")
+        )
+
         print("\n[→] Оновлення checkpoints...")
         try:
             writer = CheckpointsWriter()
-            sources_status = _sources_status_dict(collected)
             overall_status = collected.overall_status()
-            if writer.update_checkpoints(sources_status, overall_status):
-                print("[✓] Checkpoints оновлено")
+            # Per-source: просуваємо лише ті джерела, що success. Якщо ж запис/
+            # read-back не підтверджено — НЕ просуваємо жодне джерело взагалі,
+            # щоб наступний прогін повторно зібрав ці записи.
+            if storage_fully_ok:
+                sources_status = _sources_status_dict(collected)
+                if writer.update_checkpoints(sources_status, overall_status):
+                    print("[✓] Checkpoints оновлено")
+                else:
+                    print("[!] update_checkpoints повернув False")
             else:
-                print("[!] update_checkpoints повернув False")
+                print(
+                    f"[⛔] Checkpoints НЕ просунуто: storage={storage_status}, "
+                    f"readback_ok={readback_ok}. Вікно залишається, щоб не втратити записи."
+                )
         except Exception as exc:
             print(f"[!] Помилка оновлення checkpoints: {exc}")
             writer = None
+
+        # Для логів/Telegram потрібен writer навіть коли checkpoints не просунуто.
+        if writer is None:
+            try:
+                writer = CheckpointsWriter()
+            except Exception:
+                writer = None
 
         if writer is not None:
             # КРОК 6a: Детальний лог прогону (handoff_runs.jsonl на Drive)

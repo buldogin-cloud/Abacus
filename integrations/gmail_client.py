@@ -121,6 +121,19 @@ class GmailClient:
     # ------------------------------------------------------------------ #
     # Публічні методи
     # ------------------------------------------------------------------ #
+    def verify_connection(self) -> bool:
+        """Явно підтверджує робоче IMAP-підключення (Req 1).
+
+        Виконує реальний LOGIN + SELECT INBOX. Якщо App Password невірний або
+        сервер недоступний — піднімає виняток. Саме це підтвердження (а не
+        «0 листів») є доказом справної роботи Gmail.
+        """
+        self._connect_imap()
+        status, _ = self.imap.select("INBOX")
+        if status != "OK":
+            raise RuntimeError(f"IMAP SELECT INBOX повернув статус {status}")
+        return True
+
     def get_unread_messages(self, days: int = 1, max_results: int = 25) -> list[dict[str, Any]]:
         """Повертає непрочитані листи за останні N днів."""
         try:
