@@ -5,15 +5,12 @@
 import re
 from datetime import datetime
 from integrations.drive_client import DriveClient
+from modules.daily_briefing.canonical import CHECKPOINTS_FILE_ID
 
 
 class CheckpointsReader:
-    """Читач checkpoints з Google Drive"""
-    
-    # ID папок у Command Center (hardcoded для стабільності)
-    COMMAND_CENTER_ID = '1tmeJKjy_P-T38AKXHv9LtdjjqOFf4lgl'  # handoffs folder (drive.file scope)
-    CADENCE_FOLDER_ID = '1FsfbDWu9mxRSVWr72SaxMVz4YAVv49zE'
-    
+    """Читач checkpoints з Google Drive (ТІЛЬКИ канонічний файл за ID)."""
+
     def __init__(self):
         """Ініціалізація"""
         self.drive = DriveClient()
@@ -21,27 +18,21 @@ class CheckpointsReader:
     
     def load_from_drive(self):
         """
-        Завантажити checkpoints з Drive
-        
+        Завантажити checkpoints з Drive.
+
+        Req 2: читаємо КАНОНІЧНИЙ checkpoints.md за явним ID у корені Command
+        Center, а не шукаємо за назвою у теці handoffs (де лежала паралельна
+        копія). Так Reader і Writer завжди працюють з одним файлом.
+
         Returns:
-            Словник з timestamps або None при помилці
+            Словник з timestamps або defaults при помилці
         """
         try:
-            # Знаходимо файл checkpoints.md
-            # Req 7: читаємо з тієї самої теки, куди пише CheckpointsWriter
-            # (handoffs folder). Раніше тут був CADENCE_FOLDER_ID — через це
-            # Reader читав не той файл і delta-вікно ламалося.
-            file = self.drive.find_file('checkpoints.md', self.COMMAND_CENTER_ID)
-            
-            if not file:
-                print("⚠️ Файл checkpoints.md не знайдено, використовуємо defaults")
-                return self._get_defaults()
-            
-            # Читаємо вміст
-            content = self.drive.read_file(file['id'])
-            
+            # Читаємо вміст канонічного файлу прямо за ID.
+            content = self.drive.read_file(CHECKPOINTS_FILE_ID)
+
             if not content:
-                print("⚠️ Не вдалося прочитати checkpoints.md")
+                print("⚠️ Не вдалося прочитати канонічний checkpoints.md")
                 return self._get_defaults()
             
             # Парсимо YAML з markdown

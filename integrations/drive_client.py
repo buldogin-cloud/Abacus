@@ -124,6 +124,54 @@ class DriveClient:
             print(f"❌ Помилка запису файлу: {e}")
             return None
 
+    def update_file_by_id(self, file_id, content, mime_type='text/markdown'):
+        """
+        Оновити вміст існуючого файлу за ЯВНИМ ID (без пошуку за назвою).
+
+        Використовується для канонічних файлів Command Center (Req 2):
+        checkpoints.md / automation_log.md / handoff_runs.jsonl — щоб гарантовано
+        писати в один і той самий файл, а не створювати паралельні копії.
+
+        Args:
+            file_id: ID існуючого файлу в Drive
+            content: Текстовий вміст
+            mime_type: MIME тип файлу
+
+        Returns:
+            ID файлу при успіху, або None при помилці
+        """
+        try:
+            media = MediaIoBaseUpload(
+                io.BytesIO(content.encode('utf-8')),
+                mimetype=mime_type,
+                resumable=True
+            )
+            file = self.service.files().update(
+                fileId=file_id,
+                media_body=media
+            ).execute()
+            return file.get('id', file_id)
+        except Exception as e:
+            print(f"❌ Помилка оновлення файлу {file_id}: {e}")
+            return None
+
+    def trash_file(self, file_id):
+        """
+        Перемістити файл у кошик (м'яке видалення) за ID.
+
+        Використовується одноразово для прибирання паралельних копій
+        checkpoints/журналів у теці handoffs (Req 2).
+        """
+        try:
+            self.service.files().update(
+                fileId=file_id,
+                body={'trashed': True}
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"❌ Помилка переміщення у кошик {file_id}: {e}")
+            return False
+
     def delete_file(self, file_id):
         """
         Видалити файл з Drive

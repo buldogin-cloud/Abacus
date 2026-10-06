@@ -121,6 +121,45 @@ def _sources_status_dict(collected: CollectedData) -> dict:
     }
 
 
+def _gmail_connection_ok(collected: CollectedData) -> bool:
+    """Чи підтверджено з'єднання з Gmail (Req 1/6)."""
+    gmail = collected.sources.get("gmail")
+    if gmail is None:
+        return False
+    return bool(getattr(gmail, "connection_verified", False))
+
+
+def compute_run_status(collected: CollectedData, handoff_result: dict) -> str:
+    """Чесний підсумковий статус прогону (Req 6).
+
+    success — ЛИШЕ коли виконано ВСІ умови:
+        • Gmail доступний (connection_verified);
+        • збір джерел success;
+        • handoff записано і підтверджено read-back;
+        • радар: success або skipped (немає нормативних док.), з підтвердженими рядками;
+        • немає критичних помилок запису.
+    Інакше — partial (або failed, якщо все впало).
+    """
+    overall = collected.overall_status()
+    storage = handoff_result.get("storage_status", "unknown")
+    readback_ok = handoff_result.get("readback_ok", False)
+    radar_status = handoff_result.get("radar_status", "unknown")
+    gmail_ok = _gmail_connection_ok(collected)
+
+    # Повний провал: збір впав або запис впав.
+    if overall == "failed" or storage == "failed":
+        return "failed"
+
+    all_ok = (
+        gmail_ok
+        and overall == "success"
+        and storage in ("success", "skipped")
+        and readback_ok
+        and radar_status in ("success", "skipped")
+    )
+    return "success" if all_ok else "partial"
+
+
 def _build_run_detail(
     collected: CollectedData,
     handoff_result: dict,
@@ -131,13 +170,7 @@ def _build_run_detail(
     """Побудувати повний структурований запис прогону для handoff_runs.jsonl."""
     overall = collected.overall_status()
     storage = handoff_result.get("storage_status", "unknown")
-
-    if overall == "success" and storage in ("success", "skipped"):
-        run_status = "success"
-    elif overall == "failed" or storage == "failed":
-        run_status = "failed"
-    else:
-        run_status = "partial"
+    run_status = compute_run_status(collected, handoff_result)
 
     sources_detail = {
         source: {
@@ -177,14 +210,22 @@ def _build_run_detail(
         "classification_counts": handoff_result.get("classification_counts", {}),
         "readback_confirmed": handoff_result.get("readback_confirmed", 0),
         "readback_ok": handoff_result.get("readback_ok", False),
+        # Gmail (Req 1/6)
+        "gmail_connection_verified": _gmail_connection_ok(collected),
+        # Радар нормативних документів (Req 3/5)
         "radar_rows_total": handoff_result.get("radar_rows_total", 0),
         "radar_rows_added": handoff_result.get("radar_rows_added", 0),
         "radar_rows_updated": handoff_result.get("radar_rows_updated", 0),
+        "radar_confirmed": handoff_result.get("radar_confirmed", 0),
+        "radar_fetch_verified": handoff_result.get("radar_fetch_verified", 0),
+        "radar_docs_downloaded": handoff_result.get("radar_docs_downloaded", 0),
         "radar_status": handoff_result.get("radar_status", "unknown"),
+        "radar_target": handoff_result.get("radar_target", ""),
         # Посилання на файли
         "output_refs": {
             "handoff_file": handoff_result.get("handoff_file", ""),
             "handoff_folder_id": handoff_result.get("handoff_folder_id", ""),
+            "radar_target": handoff_result.get("radar_target", ""),
         },
         # Помилки / необроблене (Req 8)
         "errors": handoff_result.get("errors", []),
@@ -192,86 +233,117 @@ def _build_run_detail(
     }
 
 
+def _md_escape(text: str) -> str:
+    """Екранувати символи legacy-Markdown Telegram (_ * ` [)."""
+    out = str(text)
+    for ch in "_*`[":
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
 def _build_telegram_summary(
     collected: CollectedData,
     handoff_result: dict,
     window_start: str,
+    run_status: str = "partial",
+    writer: "CheckpointsWriter | None" = None,
 ) -> str:
-    """Формує короткий Telegram-summary для Андрія.
+    """Формує короткий Telegram-summary для Андрія (Req 5 — синхронізація статусів).
 
     НЕ є брифінгом — лише технічна інформація про прогін.
-    Брифінг формує Secretary після читання handoff.
+    Брифінг формує Secretary після читання handoff. Показує ОКРЕМО:
+    стан кожного джерела, створені handoff, дублі, невалідні записи,
+    результати класифікації, фактичну кількість рядків радара у вкладці,
+    завантажені документи, підтверджені read-back, посилання на канонічні
+    checkpoint + log.
     """
     now = datetime.now()
     source_icons = {
-        "success": "✅",
-        "partial": "⚠️",
-        "failed": "❌",
-        "source_unavailable": "—",
-        "skipped": "—",
+        "success": "✅", "partial": "⚠️", "failed": "❌",
+        "source_unavailable": "—", "skipped": "—",
     }
+    run_icon = source_icons.get(run_status, "?")
     source_labels = {
-        "gmail": "Gmail",
-        "calendar": "Calendar",
-        "tasks": "Реєстр завдань",
-        "researcher": "МОЗ/НСЗУ",
+        "gmail": "Gmail", "calendar": "Calendar",
+        "tasks": "Реєстр завдань", "researcher": "МОЗ/НСЗУ",
     }
 
     lines = [
         f"📡 *Abacus — прогін {now:%d.%m.%Y %H:%M}*",
+        f"*Підсумок:* {run_icon} {run_status.upper()}",
         "",
-        "*Джерела:*",
+        "*Джерела (стан кожного):*",
     ]
     for source, result in collected.sources.items():
         icon = source_icons.get(result.status, "?")
         label = source_labels.get(source, source)
         count = len(result.records)
-        lines.append(f"  {icon} {label}: {count} записів")
+        conn = ""
+        if source == "gmail":
+            conn = " (з'єднання підтв.)" if getattr(result, "connection_verified", False) \
+                else " (з'єднання НЕ підтв.)"
+        lines.append(f"  {icon} {label}: {count} записів{conn}")
 
     lines.append("")
 
     n_written = handoff_result.get("handoffs_written", 0)
     n_skipped = handoff_result.get("handoffs_skipped_duplicate", 0)
     n_priority = handoff_result.get("priority_handoffs", 0)
+    n_invalid = handoff_result.get("invalid_dropped", 0)
     storage = handoff_result.get("storage_status", "unknown")
     storage_icon = source_icons.get(storage, "?")
 
-    lines.append(f"*SECRETARY\\_HANDOFF:* {storage_icon} {n_written} нових записів")
+    lines.append(f"*SECRETARY\\_HANDOFF:* {storage_icon} {n_written} створено")
+    lines.append(f"  ↩ дублів: {n_skipped} / 🗑 невалідних: {n_invalid}")
     if n_priority:
-        lines.append(f"  ‼️ у т.ч. {n_priority} пріоритетних")
-    if n_skipped:
-        lines.append(f"  ↩ {n_skipped} дублів пропущено")
-    n_invalid = handoff_result.get("invalid_dropped", 0)
-    if n_invalid:
-        lines.append(f"  🗑 {n_invalid} неповних відкинуто")
+        lines.append(f"  ‼️ пріоритетних: {n_priority}")
 
     cc = handoff_result.get("classification_counts", {}) or {}
-    if any(cc.values()):
-        lines.append(
-            f"  🧩 new\\_task: {cc.get('new_task', 0)} / "
-            f"update: {cc.get('update_existing', 0)} / "
-            f"info: {cc.get('info_only', 0)} / "
-            f"review: {cc.get('needs_review', 0)}"
-        )
+    lines.append(
+        f"  🧩 класифікація: new\\_task {cc.get('new_task', 0)} / "
+        f"update {cc.get('update_existing', 0)} / "
+        f"info {cc.get('info_only', 0)} / "
+        f"review {cc.get('needs_review', 0)}"
+    )
 
     rb_ok = handoff_result.get("readback_ok", False)
     rb_icon = "✅" if rb_ok else "⚠️"
-    lines.append(f"  {rb_icon} read\\-back: {handoff_result.get('readback_confirmed', 0)} підтверджено")
+    lines.append(f"  {rb_icon} read-back handoff: {handoff_result.get('readback_confirmed', 0)} підтв.")
 
-    radar_total = handoff_result.get("radar_rows_total", 0)
-    radar_added = handoff_result.get("radar_rows_added", 0)
-    if radar_total or radar_added:
-        lines.append(
-            f"  📑 Радар норм\\. док\\.: +{radar_added} нових, всього {radar_total}"
-        )
+    # ── Радар нормативних документів (Req 3/5) ────────────────
+    radar_status = handoff_result.get("radar_status", "unknown")
+    radar_icon = source_icons.get(radar_status, "?")
+    lines.append("")
+    lines.append(f"*Радар норм. док.:* {radar_icon} {radar_status}")
+    lines.append(
+        f"  📑 рядків у вкладці: {handoff_result.get('radar_rows_total', 0)} "
+        f"(+{handoff_result.get('radar_rows_added', 0)} / "
+        f"~{handoff_result.get('radar_rows_updated', 0)})"
+    )
+    lines.append(
+        f"  ✅ підтв. read-back: {handoff_result.get('radar_confirmed', 0)} / "
+        f"🌐 джерело перевірено: {handoff_result.get('radar_fetch_verified', 0)}"
+    )
+    lines.append(f"  📥 завантажено док.: {handoff_result.get('radar_docs_downloaded', 0)}")
 
-    if handoff_result.get("error"):
-        lines.append(f"  ⚠️ Помилка: `{str(handoff_result['error'])[:100]}`")
+    # ── Канонічні файли (Req 2/5) ─────────────────────────────
+    if writer is not None:
+        lines.append("")
+        lines.append("*Канонічні файли:*")
+        lines.append(f"  📌 [checkpoints]({writer.checkpoints_url})")
+        lines.append(f"  📜 [automation log]({writer.automation_log_url})")
+
+    errs = handoff_result.get("errors", []) or []
+    if errs:
+        lines.append("")
+        lines.append(f"⚠️ зауваги/необроблене: {len(errs)}")
+        for e in errs[:3]:
+            lines.append(f"  • {_md_escape(str(e)[:90])}")
 
     lines.append("")
     window_date = window_start[:10] if len(window_start) >= 10 else window_start
-    lines.append(f"_Вікно: {window_date} → {now:%Y\\-%m\\-%d}_")
-    lines.append("_Брифінг формує Secretary після читання handoff\\._")
+    lines.append(f"_Вікно: {window_date} → {now:%Y-%m-%d}_")
+    lines.append("_Брифінг формує Secretary після читання handoff._")
 
     return "\n".join(lines)
 
@@ -293,6 +365,8 @@ def _print_stdout_stats(
     print(f"  finished_at  : {finished_at}")
     print(f"  window_start : {window_start}")
     print(f"  overall      : {collected.overall_status()}")
+    print()
+    print(f"  RUN STATUS   : {compute_run_status(collected, handoff_result).upper()}")
     print()
     print("  Джерела:")
     for src, res in collected.sources.items():
@@ -318,7 +392,11 @@ def _print_stdout_stats(
     print(f"    rows_total       : {handoff_result.get('radar_rows_total', 0)}")
     print(f"    added/updated    : {handoff_result.get('radar_rows_added', 0)}"
           f"/{handoff_result.get('radar_rows_updated', 0)}")
+    print(f"    confirmed(rb)    : {handoff_result.get('radar_confirmed', 0)}")
+    print(f"    fetch_verified   : {handoff_result.get('radar_fetch_verified', 0)}")
+    print(f"    docs_downloaded  : {handoff_result.get('radar_docs_downloaded', 0)}")
     print(f"    radar_status     : {handoff_result.get('radar_status', '—')}")
+    print(f"    radar_target     : {handoff_result.get('radar_target', '—')}")
     errs = handoff_result.get("errors", []) or []
     if errs:
         print(f"    errors/unproc.   : {len(errs)}")
@@ -418,8 +496,9 @@ def main() -> None:
     if args.no_drive:
         radar_result: dict[str, Any] = {
             "radar_rows_total": 0, "radar_rows_added": 0, "radar_rows_updated": 0,
+            "radar_confirmed": 0, "radar_fetch_verified": 0, "radar_docs_downloaded": 0,
             "radar_status": "skipped", "readback_ok": True,
-            "radar_file": "radar_normative.jsonl", "error": None,
+            "radar_target": "", "error": None, "errors": [],
         }
     else:
         print("\n[→] Радар: обробка нормативних документів...")
@@ -429,25 +508,37 @@ def main() -> None:
             print(f"[✗] Помилка радара: {exc}")
             radar_result = {
                 "radar_rows_total": 0, "radar_rows_added": 0, "radar_rows_updated": 0,
+                "radar_confirmed": 0, "radar_fetch_verified": 0, "radar_docs_downloaded": 0,
                 "radar_status": "failed", "readback_ok": False,
-                "radar_file": "radar_normative.jsonl", "error": str(exc),
+                "radar_target": "", "error": str(exc), "errors": [f"radar: {exc}"],
             }
         print(
             f"[✓] Радар: +{radar_result['radar_rows_added']} нових, "
             f"~{radar_result['radar_rows_updated']} оновлено, "
             f"всього {radar_result['radar_rows_total']}, "
+            f"підтв.={radar_result.get('radar_confirmed', 0)}, "
             f"status={radar_result['radar_status']}"
         )
 
-    # Зводимо радар у handoff_result, щоб summary/лог бачили його (Req 8).
+    # Зводимо радар у handoff_result, щоб summary/лог бачили його (Req 5).
     handoff_result["radar_rows_total"] = radar_result.get("radar_rows_total", 0)
     handoff_result["radar_rows_added"] = radar_result.get("radar_rows_added", 0)
     handoff_result["radar_rows_updated"] = radar_result.get("radar_rows_updated", 0)
+    handoff_result["radar_confirmed"] = radar_result.get("radar_confirmed", 0)
+    handoff_result["radar_fetch_verified"] = radar_result.get("radar_fetch_verified", 0)
+    handoff_result["radar_docs_downloaded"] = radar_result.get("radar_docs_downloaded", 0)
     handoff_result["radar_status"] = radar_result.get("radar_status", "unknown")
+    handoff_result["radar_target"] = radar_result.get("radar_target", "")
+    handoff_result["radar_readback_ok"] = radar_result.get("readback_ok", False)
     if radar_result.get("error"):
         handoff_result.setdefault("errors", []).append(f"radar: {radar_result['error']}")
+    for e in radar_result.get("errors", []) or []:
+        handoff_result.setdefault("errors", []).append(e)
 
     finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # Чесний підсумковий статус прогону (Req 6) — єдине джерело істини.
+    run_status = compute_run_status(collected, handoff_result)
 
     # ── КРОКИ 5–6: Checkpoints + Automation Log ──────────────
     writer: CheckpointsWriter | None = None
@@ -460,8 +551,12 @@ def main() -> None:
         storage_status = handoff_result.get("storage_status", "unknown")
         readback_ok = handoff_result.get("readback_ok", False)
         radar_status = handoff_result.get("radar_status", "unknown")
+        gmail_ok = _gmail_connection_ok(collected)
+        # Req 1/6: без підтвердженого Gmail прогін не може бути success,
+        # тож і checkpoints не просуваємо.
         storage_fully_ok = (
-            storage_status == "success"
+            gmail_ok
+            and storage_status == "success"
             and readback_ok
             and radar_status in ("success", "skipped")
         )
@@ -469,20 +564,27 @@ def main() -> None:
         print("\n[→] Оновлення checkpoints...")
         try:
             writer = CheckpointsWriter()
-            overall_status = collected.overall_status()
             # Per-source: просуваємо лише ті джерела, що success. Якщо ж запис/
             # read-back не підтверджено — НЕ просуваємо жодне джерело взагалі,
             # щоб наступний прогін повторно зібрав ці записи.
+            ckpt_details = {
+                "radar_status": radar_status,
+                "radar_rows_total": handoff_result.get("radar_rows_total", 0),
+                "radar_confirmed": handoff_result.get("radar_confirmed", 0),
+                "readback_ok": readback_ok,
+                "gmail_connection_verified": gmail_ok,
+            }
             if storage_fully_ok:
                 sources_status = _sources_status_dict(collected)
-                if writer.update_checkpoints(sources_status, overall_status):
+                if writer.update_checkpoints(sources_status, run_status, ckpt_details):
                     print("[✓] Checkpoints оновлено")
                 else:
                     print("[!] update_checkpoints повернув False")
             else:
                 print(
-                    f"[⛔] Checkpoints НЕ просунуто: storage={storage_status}, "
-                    f"readback_ok={readback_ok}. Вікно залишається, щоб не втратити записи."
+                    f"[⛔] Checkpoints НЕ просунуто: gmail_ok={gmail_ok}, "
+                    f"storage={storage_status}, readback_ok={readback_ok}, "
+                    f"radar={radar_status}. Вікно залишається, щоб не втратити записи."
                 )
         except Exception as exc:
             print(f"[!] Помилка оновлення checkpoints: {exc}")
@@ -514,14 +616,8 @@ def main() -> None:
 
             # КРОК 6b: Рядок у зведеній таблиці automation_log.md
             try:
-                overall = collected.overall_status()
-                storage = handoff_result.get("storage_status", "unknown")
-                if overall == "success" and storage in ("success", "skipped"):
-                    log_status = "success"
-                elif overall == "failed" or storage == "failed":
-                    log_status = "failed"
-                else:
-                    log_status = "partial"
+                # Req 5/6: статус рядка = чесний підсумковий статус прогону.
+                log_status = run_status
 
                 sources_line = " | ".join(
                     f"{s}:{r.status}({len(r.records)})"
@@ -533,7 +629,9 @@ def main() -> None:
                     "status": log_status,
                     "result": (
                         f"written={handoff_result.get('handoffs_written', 0)}, "
-                        f"priority={handoff_result.get('priority_handoffs', 0)} | "
+                        f"priority={handoff_result.get('priority_handoffs', 0)}, "
+                        f"radar_rows={handoff_result.get('radar_rows_total', 0)}"
+                        f"(conf={handoff_result.get('radar_confirmed', 0)}) | "
                         f"{sources_line}"
                     ),
                     "file": handoff_result.get("handoff_file", "—"),
@@ -551,7 +649,10 @@ def main() -> None:
         print("\n[→] Надсилання Telegram summary...")
         try:
             from integrations.telegram_sender import send_briefing  # noqa: E402
-            summary = _build_telegram_summary(collected, handoff_result, window_start)
+            summary = _build_telegram_summary(
+                collected, handoff_result, window_start,
+                run_status=run_status, writer=writer,
+            )
             ok = send_briefing(summary)
             if ok:
                 print("[✓] Telegram summary надіслано")

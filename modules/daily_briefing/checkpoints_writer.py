@@ -1,73 +1,104 @@
 """
 Утиліта для запису checkpoints у Google Drive.
 Abacus — єдиний writer, UTC-модель.
+
+Req 2: пише ТІЛЬКИ в канонічні файли за явними ID (корінь Command Center).
+Жодних паралельних копій у теці handoffs.
 """
 
+import json
 from datetime import datetime, timezone
+
 from integrations.drive_client import DriveClient
+from modules.daily_briefing.canonical import (
+    AUTOMATION_LOG_FILE_ID,
+    CHECKPOINTS_FILE_ID,
+    HANDOFF_RUNS_FILE_ID,
+    drive_file_url,
+)
 
 
 class CheckpointsWriter:
-    """Писач checkpoints у Google Drive (Abacus)"""
-    
-    # ID папки Command Center (де у нас є права на запис)
-    COMMAND_CENTER_FOLDER_ID = '1tmeJKjy_P-T38AKXHv9LtdjjqOFf4lgl'  # handoffs folder (drive.file scope)
-    CHECKPOINT_FILE_NAME = 'checkpoints.md'
-    AUTOMATION_LOG_FILE_NAME = 'automation_log.md'
-    
+    """Писач checkpoints у Google Drive (Abacus) — лише канонічні файли за ID."""
+
     def __init__(self):
         """Ініціалізація"""
         self.drive = DriveClient()
         self.now_utc = datetime.now(timezone.utc)
         self.timestamp = self.now_utc.isoformat().replace('+00:00', 'Z')
-    
-    def update_checkpoints(self, sources: dict, status: str = 'success') -> bool:
+
+    # Публічні посилання на канонічні файли (для summary, Req 5)
+    @property
+    def checkpoints_url(self) -> str:
+        return drive_file_url(CHECKPOINTS_FILE_ID)
+
+    @property
+    def automation_log_url(self) -> str:
+        return drive_file_url(AUTOMATION_LOG_FILE_ID)
+
+    def update_checkpoints(
+        self,
+        sources: dict,
+        status: str = 'success',
+        details: dict | None = None,
+    ) -> bool:
         """
-        Оновити checkpoints після успішного прогону брифінгу.
-        
+        Оновити канонічний checkpoints.md після прогону.
+
         Args:
-            sources: {
-                'gmail': True/False,
-                'calendar': True/False,
-                'tasks': True/False,
-                'researcher': True/False,
-            }
-            status: 'success', 'partial', 'failed'
-            
+            sources: {'gmail': True/False, 'calendar': ..., 'tasks': ..., 'researcher': ...}
+            status: 'success' | 'partial' | 'failed'
+            details: опційні деталі (radar, readback тощо) для нотаток.
+
         Returns:
             True якщо успішно, False якщо помилка
         """
         try:
-            # Генеруємо вміст
-            content = self._generate_checkpoints_content(sources, status)
-            
-            # write_file автоматично оновить або створить файл
-            file_id = self.drive.write_file(
+            content = self._generate_checkpoints_content(sources, status, details or {})
+            # Req 2: пишемо за ЯВНИМ ID канонічного файлу.
+            file_id = self.drive.update_file_by_id(
+                file_id=CHECKPOINTS_FILE_ID,
                 content=content,
-                filename=self.CHECKPOINT_FILE_NAME,
-                parent_id=self.COMMAND_CENTER_FOLDER_ID,
-                mime_type='text/markdown'
+                mime_type='text/markdown',
             )
-            
             if file_id:
-                print(f"✅ Checkpoints оновлено: {self.timestamp}")
+                print(f"✅ Канонічний checkpoints.md оновлено: {self.timestamp}")
                 return True
-            else:
-                print("❌ Помилка оновлення checkpoints")
-                return False
-                    
+            print("❌ Помилка оновлення канонічного checkpoints.md")
+            return False
         except Exception as e:
             print(f"❌ Помилка запису checkpoints: {e}")
             return False
-    
-    def _generate_checkpoints_content(self, sources: dict, status: str) -> str:
-        """Генерувати вміст checkpoints.md"""
+
+    def _status_value(self, ok: bool, run_status: str) -> str:
+        """Статус джерела у YAML: success / failed (залежно від перевірки)."""
+        if ok:
+            return "success"
+        # partial-прогін: джерело не підтверджено.
+        return "failed" if run_status in ("partial", "failed") else "pending"
+
+    def _generate_checkpoints_content(
+        self, sources: dict, status: str, details: dict
+    ) -> str:
+        """Генерувати вміст канонічного checkpoints.md"""
         status_icon = {
             'success': '✅',
             'partial': '⚠️',
-            'failed': '❌'
+            'failed': '❌',
         }.get(status, '?')
-        
+
+        def ts(ok: bool) -> str:
+            # Просуваємо _last_success лише для реально підтверджених джерел.
+            return self.timestamp if ok else 'N/A'
+
+        radar_note = ""
+        if details:
+            radar_note = (
+                f"radar_status: {details.get('radar_status', 'unknown')}\n"
+                f"radar_rows_in_tab: {details.get('radar_rows_total', 0)}\n"
+                f"readback_ok: {details.get('readback_ok', False)}\n"
+            )
+
         return f"""# Command Center — Checkpoints
 
 Цей файл відстежує останні успішні перевірки джерел даних.  
@@ -84,146 +115,98 @@ run_timestamp: {self.timestamp}
 run_agent: Abacus
 timezone_canonical: UTC
 
-gmail_last_success: {self.timestamp if sources.get('gmail') else 'N/A'}
+gmail_last_success: {ts(sources.get('gmail'))}
 gmail_last_checked: {self.timestamp}
-gmail_status: {"success" if sources.get('gmail') else "pending"}
+gmail_status: {self._status_value(sources.get('gmail'), status)}
 
-calendar_last_success: {self.timestamp if sources.get('calendar') else 'N/A'}
+calendar_last_success: {ts(sources.get('calendar'))}
 calendar_last_checked: {self.timestamp}
-calendar_status: {"success" if sources.get('calendar') else "pending"}
+calendar_status: {self._status_value(sources.get('calendar'), status)}
 
-tasks_last_success: {self.timestamp if sources.get('tasks') else 'N/A'}
+tasks_last_success: {ts(sources.get('tasks'))}
 tasks_last_checked: {self.timestamp}
-tasks_status: {"success" if sources.get('tasks') else "pending"}
+tasks_status: {self._status_value(sources.get('tasks'), status)}
 
-researcher_last_success: {self.timestamp if sources.get('researcher') else 'N/A'}
+researcher_last_success: {ts(sources.get('researcher'))}
 researcher_last_checked: {self.timestamp}
-researcher_status: {"success" if sources.get('researcher') else "pending"}
-```
+researcher_status: {self._status_value(sources.get('researcher'), status)}
+
+{radar_note}```
 
 ---
 
 ## Notes
 
 - **Тільки UTC** у файлі (відображення в Kyiv — у `automation_log.md` та брифінгах)
-- **Єдиний writer:** тільки Abacus записує цей файл
+- **Єдиний writer:** тільки Abacus записує цей файл (канонічний, за ID)
 - **Мета:** Delta-only обробка (Abacus читає `_last_success`, збирає лише нове)
+- **Checkpoint просувається** лише коли джерело підтверджено, handoff записаний
+  і підтверджений read-back (Req 6). Інакше вікно лишається, щоб не втратити дані.
 - **ChatGPT:** читає для аналізу, не редагує
 """
-    
+
     def append_to_automation_log(self, event: dict) -> bool:
         """
-        Додати event до automation_log.md.
-        
+        Додати event до канонічного automation_log.md (за ID).
+
         Args:
-            event: {
-                'time_utc': '07:00',
-                'task': 'gmail_check',
-                'status': 'success|partial|failed',
-                'result': 'текст результату',
-                'file': 'path/to/briefing_2026-09-19.md'
-            }
-            
+            event: {'time_utc','task','status','result','file'}
+
         Returns:
             True якщо успішно
         """
         try:
-            # Шукаємо існуючий файл
-            log_file = self.drive.find_file(
-                self.AUTOMATION_LOG_FILE_NAME,
-                self.COMMAND_CENTER_FOLDER_ID
-            )
-            
-            if log_file:
-                # Читаємо поточний вміст
-                current_content = self.drive.read_file(log_file['id'])
-            else:
-                # Створюємо новий файл з header
+            current_content = self.drive.read_file(AUTOMATION_LOG_FILE_ID)
+            if not current_content:
                 current_content = self._generate_automation_log_header()
-            
-            # Форматуємо new row
+
             status_icon = {'success': '✅', 'partial': '⚠️', 'failed': '❌'}.get(
                 event.get('status', '?'), '?'
             )
-            new_row = f"| {event['time_utc']} UTC | {event['task']} | {status_icon} {event['status'].upper()} | {event['result']} | {event.get('file', '—')} |\n"
-            
-            # Додаємо новий рядок в кінець таблиці (перед примітками)
-            if '\n---' in current_content:
-                # Є секція примітки, додаємо перед нею
-                updated = current_content.replace('\n---', f'\n{new_row}---')
-            else:
-                # Просто додаємо в кінець
-                updated = current_content.rstrip() + '\n' + new_row
-            
-            # Записуємо
-            file_id = self.drive.write_file(
-                content=updated,
-                filename=self.AUTOMATION_LOG_FILE_NAME,
-                parent_id=self.COMMAND_CENTER_FOLDER_ID,
-                mime_type='text/markdown'
+            new_row = (
+                f"| {event['time_utc']} UTC | {event['task']} | "
+                f"{status_icon} {event['status'].upper()} | {event['result']} | "
+                f"{event.get('file', '—')} |\n"
             )
-            
+
+            if '\n---' in current_content:
+                updated = current_content.replace('\n---', f'\n{new_row}---', 1)
+            else:
+                updated = current_content.rstrip() + '\n' + new_row
+
+            file_id = self.drive.update_file_by_id(
+                file_id=AUTOMATION_LOG_FILE_ID,
+                content=updated,
+                mime_type='text/markdown',
+            )
             if file_id:
-                print(f"✅ Log event: {event['task']}")
+                print(f"✅ Канонічний automation_log.md: {event['task']}")
                 return True
             return False
-                
         except Exception as e:
             print(f"❌ Помилка логу: {e}")
             return False
-    
+
     def log_handoff_run(self, run_detail: dict) -> bool:
         """
-        Записати повний структурований запис прогону у handoff_runs.jsonl.
-
-        Файл зберігається у Command Center поряд із checkpoints.md.
-        Кожен рядок — JSON-об'єкт одного прогону (JSONL-формат).
-
-        Args:
-            run_detail: {
-                run_id, trigger, produced_by, started_at, finished_at,
-                window_start, window_end,
-                overall_status, source_check_status,
-                analysis_status, storage_status, handoff_status,
-                sources_checked: {source: {status, records_count, error, ...}},
-                handoffs_written, handoffs_skipped_duplicate, priority_handoffs,
-                output_refs: {handoff_file, handoff_folder_id},
-                error,
-            }
-
-        Returns:
-            True якщо успішно записано, False — помилка.
+        Дозаписати структурований запис прогону у канонічний handoff_runs.jsonl (за ID).
+        Кожен рядок — JSON одного прогону.
         """
-        import json
-
-        log_filename = "handoff_runs.jsonl"
         try:
-            existing_file = self.drive.find_file(
-                log_filename,
-                self.COMMAND_CENTER_FOLDER_ID,
-            )
-
-            current_content: str = ""
-            if existing_file:
-                current_content = self.drive.read_file(existing_file["id"]) or ""
-
+            current_content = self.drive.read_file(HANDOFF_RUNS_FILE_ID) or ""
             new_line = json.dumps(run_detail, ensure_ascii=False) + "\n"
             updated = current_content + new_line
 
-            file_id = self.drive.write_file(
+            file_id = self.drive.update_file_by_id(
+                file_id=HANDOFF_RUNS_FILE_ID,
                 content=updated,
-                filename=log_filename,
-                parent_id=self.COMMAND_CENTER_FOLDER_ID,
                 mime_type="text/plain",
             )
-
             if file_id:
                 print(f"✅ handoff_runs.jsonl: {run_detail.get('run_id', '?')} записано")
                 return True
-            else:
-                print("❌ log_handoff_run: drive.write_file повернув None")
-                return False
-
+            print("❌ log_handoff_run: update_file_by_id повернув None")
+            return False
         except Exception as exc:
             print(f"❌ log_handoff_run: {exc}")
             return False

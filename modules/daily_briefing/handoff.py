@@ -85,6 +85,16 @@ def _norm_doc_key(record: dict) -> str | None:
     return None
 
 
+def _norm_order_no(text: str) -> str:
+    """Нормалізувати номер документа для зіставлення (лише цифри та літери).
+
+    «№ 1328-ю» та «1328ю» зводяться до однакового вигляду, щоб порівняння
+    номера наказу в записі та в назві задачі було стійким.
+    """
+    import re
+    return re.sub(r"[^0-9a-zа-яіїєґ]", "", (text or "").lower())
+
+
 # Українські стоп-слова, що НЕ є значущими для зіставлення (Req 3).
 _STOPWORDS = {
     "про", "щодо", "для", "від", "при", "над", "під", "або", "та", "і", "й",
@@ -145,6 +155,23 @@ class Deduplicator:
         """
         text = record.get("subject") or record.get("title") or ""
         rec_tokens = _significant_tokens(text)
+
+        # ── Req 4: якщо в записі є номер документа (нагадування/лист із №наказу),
+        # зіставляємо з реєстром ЗА НОМЕРОМ, але підтверджуємо лише за збігом
+        # змісту. Номер без збігу змісту — не надійний зв'язок (needs_review).
+        order_no = (record.get("order_no") or "").strip()
+        if order_no:
+            norm_no = _norm_order_no(order_no)
+            for task in self.registry_tasks:
+                task_name = task.get("task_name") or ""
+                if norm_no and norm_no in _norm_order_no(task_name):
+                    # Номер збігся. Перевіряємо зміст.
+                    task_tokens = _significant_tokens(task_name)
+                    content_overlap = len(rec_tokens & task_tokens)
+                    if content_overlap >= 1:
+                        return task, True   # номер + зміст → надійно
+                    return task, False      # лише номер → хай вирішує Secretary
+
         if not rec_tokens:
             return None, False
 
@@ -196,6 +223,17 @@ def classify_handoff(
     """
     category = record.get("category_guess", "")
     source = record.get("source", "")
+
+    # ── Календар (Req 4): події НІКОЛИ не стають автоматичним оновленням задач.
+    # Особиста подія — info_only і НЕ передається в реєстр.
+    # Звичайна подія без ознаки робочої дії — info_only.
+    # Подія з ознакою дії/документа — needs_review (рішення за Secretary).
+    if source == "calendar":
+        if record.get("is_personal"):
+            return "info_only"
+        if record.get("has_action"):
+            return "needs_review"
+        return "info_only"
 
     # Надійний збіг із реєстром → кандидат на оновлення.
     if registry_match and confident:

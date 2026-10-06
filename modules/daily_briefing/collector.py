@@ -232,6 +232,38 @@ def _guess_email_category(subject_lower: str) -> str:
 # Calendar Collector
 # ────────────────────────────────────────────────────────────
 
+# Ключові слова особистих подій (Req 4): такі події НЕ передаються в реєстр
+# завдань, а лише фіксуються як info_only.
+_PERSONAL_EVENT_KEYWORDS = (
+    "день народження", "birthday", "др ", "лікар", "стоматолог", "медогляд",
+    "відпустка", "vacation", "сімей", "родин", "особист", "вечеря", "dinner",
+    "обід", "lunch", "кава", "coffee", "зустріч з друз", "party", "вечірка",
+    "спортзал", "басейн", "тренуванн", "фітнес", "перукар", "manicure",
+    "манікюр", "кіно", "театр", "concert", "концерт", "весілля", "wedding",
+    "хрестини", "ювілей", "свято", "holiday", "appointment",
+)
+
+# Слова-маркери конкретної робочої дії/нормативного документа в події.
+_ACTION_EVENT_KEYWORDS = (
+    "наказ", "розпорядження", "постанов", "протокол", "дедлайн", "термін",
+    "здати", "подати", "звіт", "нарада", "засідання", "комісі", "тендер",
+    "закупівл", "доручення", "№",
+)
+
+
+def _classify_calendar_event(title: str, description: str) -> tuple[bool, bool]:
+    """Визначити характер події календаря (Req 4).
+
+    Повертає (is_personal, has_action):
+        is_personal — подія особистого характеру (не для реєстру завдань);
+        has_action  — у події є ознака конкретної робочої дії / документа.
+    """
+    text = f"{title} {description}".lower()
+    is_personal = any(kw in text for kw in _PERSONAL_EVENT_KEYWORDS)
+    has_action = any(kw in text for kw in _ACTION_EVENT_KEYWORDS)
+    return is_personal, has_action
+
+
 def collect_calendar(cfg: dict[str, Any], window_start: str) -> SourceResult:
     """
     Технічний збір подій Google Calendar.
@@ -281,6 +313,9 @@ def collect_calendar(cfg: dict[str, Any], window_start: str) -> SourceResult:
         title = event.get("summary", "").strip()
         start = event.get("start", "")
         location = event.get("location", "").strip()
+        description = (event.get("description") or "")[:300]
+        # Req 4: характер події (особиста / з робочою дією).
+        is_personal, has_action = _classify_calendar_event(title, description)
         # Req 2: непорожній factual_summary для кожної події.
         fs_parts = [p for p in [title, f"початок: {start}" if start else "", location] if p]
         record = {
@@ -293,8 +328,10 @@ def collect_calendar(cfg: dict[str, Any], window_start: str) -> SourceResult:
             "end": event.get("end", ""),
             "all_day": event.get("all_day", False),
             "location": location,
-            "description": (event.get("description") or "")[:300],
+            "description": description,
             "is_today": event in today,
+            "is_personal": is_personal,
+            "has_action": has_action,
         }
         records.append(record)
 
