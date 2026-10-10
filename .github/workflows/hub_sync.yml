@@ -7,6 +7,15 @@ on:
     - cron: "30 6 * * *"
     - cron: "30 13 * * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: dry_run
+        type: choice
+        options:
+          - dry_run
+          - execute
 
 permissions:
   contents: read
@@ -47,11 +56,16 @@ jobs:
           test -n "${HUB_SPREADSHEET_ID:-}"
 
       - name: Sync Secretary registry to Hub
-        run: >-
-          python -m modules.hub_sync.runner
-          --config modules/hub_sync/production_contract.json
-          --execute
-          --report "$RUNNER_TEMP/hub_sync_report.json"
+        shell: bash
+        run: |
+          execute_flag=""
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.mode }}" == "execute" ]]; then
+            execute_flag="--execute"
+          fi
+          python -m modules.hub_sync.runner \
+            --config modules/hub_sync/production_contract.json \
+            ${execute_flag} \
+            --report "$RUNNER_TEMP/hub_sync_report.json"
 
       - name: Upload sanitized run report
         if: always()
