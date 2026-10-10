@@ -441,6 +441,29 @@ class RunnerAndMappingTests(unittest.TestCase):
         )
         self.assertEqual(rows[0].snapshot[0], 46000.5)
 
+    def test_mismatch_diagnostics_never_expose_ids_or_values(self) -> None:
+        records = source_records()
+        history = history_from_source(records)
+        changed = list(history[0].snapshot)
+        changed[3] = "different private value"
+        history[0] = HistoryRow(
+            history[0].sheet_row,
+            tuple(changed),
+            history[0].stable_id,
+            True,
+            history[0].state_id,
+        )
+
+        summary = HubSyncPlanner().diagnostic_summary(
+            records, history
+        )
+
+        self.assertEqual(summary["material_mismatch_columns"], {"D": 1})
+        self.assertEqual(summary["material_mismatch_types"], {"D:str->str": 1})
+        serialized = json.dumps(summary)
+        self.assertNotIn(records[0].stable_id, serialized)
+        self.assertNotIn("different private value", serialized)
+
     def test_production_contract_and_workflow_contain_no_private_mapping(self) -> None:
         root = Path(__file__).resolve().parents[1]
         contract = json.loads(
