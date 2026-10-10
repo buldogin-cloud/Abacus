@@ -20,6 +20,7 @@ from modules.hub_sync.planner import HubSyncPlanner, SyncValidationError
 from modules.hub_sync.runner import (
     atomic_requests_for_plan,
     assert_sync_write_boundary,
+    qualify_guard_range,
     sanitized_http_error,
 )
 
@@ -69,6 +70,16 @@ def history_from_source(records: list[SourceRecord], *, start_row: int = 6) -> l
 
 
 class PlannerTests(unittest.TestCase):
+    def test_guard_range_accepts_relative_or_matching_qualified_a1(self) -> None:
+        sheet = "00 — СЬОГОДНІ"
+        expected = "'00 — СЬОГОДНІ'!A1:N47"
+        self.assertEqual(qualify_guard_range(sheet, "A1:N47"), expected)
+        self.assertEqual(qualify_guard_range(sheet, expected), expected)
+
+    def test_guard_range_rejects_different_sheet(self) -> None:
+        with self.assertRaises(SyncValidationError):
+            qualify_guard_range("00 — СЬОГОДНІ", "'90 — ІСТОРІЯ'!A1:N47")
+
     def test_http_diagnostics_are_status_only(self) -> None:
         class Response:
             status = 403
