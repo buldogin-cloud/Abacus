@@ -158,6 +158,19 @@ def parse_history(rows: list[list[Any]], first_row: int) -> list[HistoryRow]:
     return result
 
 
+def read_history(client: Any, range_name: str, first_row: int) -> list[HistoryRow]:
+    """Read Hub history without display formatting changing scalar types.
+
+    History rows are written as raw numbers/booleans/strings.  Reading them as
+    FORMATTED_VALUE can turn a numeric serial into a date string when individual
+    rows have inherited formatting, which makes an unchanged snapshot look new.
+    """
+    return parse_history(
+        client.read_range(range_name, value_render_option="UNFORMATTED_VALUE"),
+        first_row,
+    )
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -300,8 +313,9 @@ def main(argv: list[str] | None = None) -> int:
             f"P{config.history_last_row}"
         )
         stage = "hub_history"
-        history = parse_history(
-            hub_client.read_range(history_range),
+        history = read_history(
+            hub_client,
+            history_range,
             config.history_first_row,
         )
         planner = HubSyncPlanner(
@@ -322,8 +336,9 @@ def main(argv: list[str] | None = None) -> int:
         # Lock/re-read precondition: source and history must still produce the
         # exact same plan immediately before the atomic write.
         source_prewrite = source_client.read_range(config.source_range)
-        history_prewrite = parse_history(
-            hub_client.read_range(history_range),
+        history_prewrite = read_history(
+            hub_client,
+            history_range,
             config.history_first_row,
         )
         if source_prewrite != first_source:
@@ -344,8 +359,9 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 # The transport can fail after Google accepted the batch.  Read
                 # P/current state first; never retry blindly and duplicate rows.
-                uncertain_history = parse_history(
-                    hub_client.read_range(history_range),
+                uncertain_history = read_history(
+                    hub_client,
+                    history_range,
                     config.history_first_row,
                 )
                 planner.verify_readback(records, uncertain_history, plan)
@@ -355,8 +371,9 @@ def main(argv: list[str] | None = None) -> int:
             raise SyncValidationError(
                 "Secretary source changed during sync; no checkpoint may advance"
             )
-        history_after = parse_history(
-            hub_client.read_range(history_range),
+        history_after = read_history(
+            hub_client,
+            history_range,
             config.history_first_row,
         )
         planner.verify_readback(records, history_after, plan)
