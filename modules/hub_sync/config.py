@@ -523,14 +523,17 @@ class HubSyncConfig:
                     raise ConfigError(f"Source row {source_row} has invalid date serial")
                 projected.append(int(serial) if serial.is_integer() else serial)
                 continue
-            parsed: date | None = None
             match = re.fullmatch(r"(?:До )?(\d{2}\.\d{2}\.\d{4})", text)
-            if match:
-                try:
-                    parsed = datetime.strptime(match.group(1), "%d.%m.%Y").date()
-                except ValueError:
-                    parsed = None
-            if parsed is None:
+            if not match:
+                # Candidate columns can also contain narrative scheduling text.
+                # Ignore that text and keep looking for one exact date in the
+                # remaining configured columns.
+                continue
+            try:
+                parsed = datetime.strptime(match.group(1), "%d.%m.%Y").date()
+            except ValueError:
+                # A value shaped like an exact date but invalid is ambiguous;
+                # fail closed rather than silently using a different column.
                 return ""
             projected.append((parsed - date(1899, 12, 30)).days)
         if not projected:
