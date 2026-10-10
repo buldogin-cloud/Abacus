@@ -399,6 +399,27 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(records[0].snapshot[7], "")
 
+    def test_exact_deadline_survives_narrative_alternate_date_column(self) -> None:
+        config = self.load(self.projection_config())
+        rows = self.projection_rows(deadline="До 10.10.2026")
+        for row in rows[1:]:
+            row[19] = "після узгодження"
+
+        records, _ = config.adapt_source_rows(rows)
+
+        expected_serial = (date(2026, 10, 10) - date(1899, 12, 30)).days
+        self.assertEqual(records[0].snapshot[7], expected_serial)
+
+    def test_invalid_exact_date_beats_valid_alternate_fail_closed(self) -> None:
+        config = self.load(self.projection_config())
+        rows = self.projection_rows(deadline="31.02.2026")
+        for row in rows[1:]:
+            row[19] = "10.10.2026"
+
+        records, _ = config.adapt_source_rows(rows)
+
+        self.assertEqual(records[0].snapshot[7], "")
+
     def test_duplicate_canonical_anchors_are_rejected(self) -> None:
         raw = self.make_config()
         raw["anchor_rules"] = [
