@@ -1,0 +1,69 @@
+{
+  "source_sheet": "Synthetic Registry",
+  "source_range": "'Synthetic Registry'!A1:V",
+  "history_sheet": "Synthetic History",
+  "mapping_sheet": "Synthetic Private Mapping",
+  "history_first_row": 6,
+  "history_last_row": 305,
+  "minimum_source_count": 26,
+  "task_id_column": 14,
+  "status_column": 8,
+  "identity_columns": [1, 2],
+  "anchor_rules": [
+    {
+      "when": {"column": 1, "nonempty": true, "not_in": ["No reference", "No ref"]},
+      "fields": {"document_reference": 1, "document_date": 2}
+    },
+    {
+      "fields": {"exact_title": 3, "document_date": 2}
+    }
+  ],
+  "expected_headers": {"8": "Status", "14": "Task ID"},
+  "use_task_id_direct": true,
+  "task_id_to_stable_id": {},
+  "anchor_sha256_to_stable_id": {},
+  "identity_to_stable_id": {},
+  "excluded_identities": {},
+  "status_map": {"synthetic open": "Active"},
+  "priority_map": {
+    "synthetic critical": "Critical",
+    "synthetic high": "High",
+    "synthetic medium": "Medium",
+    "synthetic low": "Low",
+    "synthetic routine": "Low"
+  },
+  "allowed_priorities": ["Critical", "High", "Medium", "Low"],
+  "category_by_stable_id": {"synthetic-task-1": "Synthetic category"},
+  "allowed_categories": ["Synthetic category"],
+  "spreadsheet_timezone": "Europe/Kiev",
+  "mapping_columns": {
+    "source_updated_raw": 18,
+    "source_checked_raw": 19,
+    "source_when": 2,
+    "source_type": 0
+  },
+  "snapshot_rules": [
+    {"kind": "first_detected_at"},
+    {"kind": "literal", "value": "Synthetic source"},
+    {"kind": "stable_category"},
+    {"kind": "source", "column": 3},
+    {
+      "kind": "raw_evidence",
+      "fields": [
+        {"label": "Task", "column": 4},
+        {"label": "Status", "column": 8},
+        {"label": "Deadline", "column": 7},
+        {"label": "When", "column": 19},
+        {"label": "Evidence", "column": 9}
+      ]
+    },
+    {"kind": "source", "column": 11},
+    {"kind": "source", "column": 10},
+    {"kind": "date", "columns": [7, 19]},
+    {"kind": "priority", "column": 0},
+    {"kind": "normalized_status"},
+    {"kind": "source", "column": 6},
+    {"kind": "source_row_url"},
+    {"kind": "material_changed_at"}
+  ]
+}
