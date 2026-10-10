@@ -1,0 +1,11 @@
+{
+  "history_sheet": "90 — ІСТОРІЯ",
+  "mapping_sheet": "98 — SECRETARY SYNC",
+  "history_first_row": 6,
+  "history_last_row": 305,
+  "minimum_source_count": 26,
+  "task_id_column": 14,
+  "status_column": 8,
+  "identity_columns": [1, 2],
+  "use_task_id_direct": false
+}
