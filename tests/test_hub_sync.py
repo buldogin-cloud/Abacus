@@ -17,7 +17,11 @@ from modules.hub_sync.mapping_store import (
 )
 from modules.hub_sync.model import CellUpdate, ExcludedSourceRow, HistoryRow, SourceRecord
 from modules.hub_sync.planner import HubSyncPlanner, SyncValidationError
-from modules.hub_sync.runner import atomic_requests_for_plan, assert_sync_write_boundary
+from modules.hub_sync.runner import (
+    atomic_requests_for_plan,
+    assert_sync_write_boundary,
+    sanitized_http_error,
+)
 
 
 def snapshot(
@@ -65,6 +69,21 @@ def history_from_source(records: list[SourceRecord], *, start_row: int = 6) -> l
 
 
 class PlannerTests(unittest.TestCase):
+    def test_http_diagnostics_are_status_only(self) -> None:
+        class Response:
+            status = 403
+
+        class PrivateHttpError(Exception):
+            resp = Response()
+
+            def __str__(self) -> str:
+                return "private spreadsheet id and response body"
+
+        self.assertEqual(
+            sanitized_http_error(PrivateHttpError()),
+            {"http_status": 403, "http_category": "permission_or_scope"},
+        )
+
     def test_second_identical_sync_is_noop(self) -> None:
         records = source_records()
         history = history_from_source(records)
