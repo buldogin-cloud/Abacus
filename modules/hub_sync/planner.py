@@ -212,6 +212,52 @@ class HubSyncPlanner:
             updates=updates,
         )
 
+    def diagnostic_summary(
+        self,
+        source: list[SourceRecord],
+        history: list[HistoryRow],
+    ) -> dict[str, Any]:
+        """Return privacy-safe mismatch structure without IDs or cell values."""
+        history_by_stable: dict[str, list[HistoryRow]] = defaultdict(list)
+        for row in history:
+            if row.stable_id:
+                history_by_stable[row.stable_id].append(row)
+
+        missing_current_count = 0
+        multiple_current_count = 0
+        mismatch_columns: dict[str, int] = defaultdict(int)
+        mismatch_types: dict[str, int] = defaultdict(int)
+        for record in source:
+            prior_rows = history_by_stable.get(record.stable_id, [])
+            current_rows = [row for row in prior_rows if row.current]
+            if not current_rows:
+                missing_current_count += 1
+                continue
+            if len(current_rows) > 1:
+                multiple_current_count += 1
+                continue
+            expected = self._snapshot_with_preserved_first_seen(
+                record.snapshot, prior_rows
+            )
+            actual = current_rows[0].snapshot
+            for index in self.material_indexes:
+                if _canon(actual[index]) == _canon(expected[index]):
+                    continue
+                column = chr(ord("A") + index)
+                mismatch_columns[column] += 1
+                type_pair = (
+                    f"{column}:{type(expected[index]).__name__}->"
+                    f"{type(actual[index]).__name__}"
+                )
+                mismatch_types[type_pair] += 1
+
+        return {
+            "missing_current_count": missing_current_count,
+            "multiple_current_count": multiple_current_count,
+            "material_mismatch_columns": dict(sorted(mismatch_columns.items())),
+            "material_mismatch_types": dict(sorted(mismatch_types.items())),
+        }
+
     def verify_readback(
         self,
         source: list[SourceRecord],
