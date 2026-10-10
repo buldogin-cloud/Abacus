@@ -26,15 +26,107 @@ class SheetsClient:
         creds = get_credentials()
         self.service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-    def read_range(self, range_name: str) -> list[list[str]]:
+    def read_range(
+        self,
+        range_name: str,
+        *,
+        value_render_option: str = "FORMATTED_VALUE",
+    ) -> list[list[Any]]:
         """Читає значення діапазону (напр. ``"Завдання!A1:F100"``)."""
         result = (
             self.service.spreadsheets()
             .values()
-            .get(spreadsheetId=self.spreadsheet_id, range=range_name)
+            .get(
+                spreadsheetId=self.spreadsheet_id,
+                range=range_name,
+                valueRenderOption=value_render_option,
+            )
             .execute()
         )
         return result.get("values", [])
+
+    def batch_update_values(
+        self,
+        data: list[dict[str, Any]],
+        *,
+        value_input_option: str = "RAW",
+    ) -> dict[str, Any]:
+        """Apply narrow, explicitly ranged value updates in one API request.
+
+        ``RAW`` is the safe default for Hub history: source text cannot become
+        an unintended formula.  Callers must perform a readback before moving
+        any checkpoint.
+        """
+        if not data:
+            return {"totalUpdatedCells": 0}
+        return (
+            self.service.spreadsheets()
+            .values()
+            .batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={
+                    "valueInputOption": value_input_option,
+                    "data": data,
+                    "includeValuesInResponse": False,
+                },
+            )
+            .execute()
+        )
+
+    def read_user_entered_values(self, range_name: str) -> list[dict[str, Any]]:
+        """Read only formulas/literals physically entered in the guarded grid.
+
+        Calculated and spilled values are intentionally excluded so a normal
+        source refresh cannot look like a frontend-formula mutation.
+        """
+        result = (
+            self.service.spreadsheets()
+            .get(
+                spreadsheetId=self.spreadsheet_id,
+                ranges=[range_name],
+                includeGridData=True,
+                fields=(
+                    "sheets(properties(sheetId,title),"
+                    "data(startRow,startColumn,rowData(values(userEnteredValue))))"
+                ),
+            )
+            .execute()
+        )
+        return result.get("sheets", [])
+
+    def get_sheet_ids(self) -> dict[str, int]:
+        """Return exact title -> numeric sheet ID without reading cell data."""
+        result = (
+            self.service.spreadsheets()
+            .get(
+                spreadsheetId=self.spreadsheet_id,
+                fields="sheets.properties(sheetId,title)",
+            )
+            .execute()
+        )
+        return {
+            item["properties"]["title"]: int(item["properties"]["sheetId"])
+            for item in result.get("sheets", [])
+        }
+
+    def atomic_batch_update(self, requests: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply validated spreadsheet requests atomically.
+
+        Google Sheets validates all ``spreadsheets.batchUpdate`` requests before
+        applying them.  The Hub runner still performs an exact readback because
+        a network failure can make the client uncertain whether the batch was
+        committed.
+        """
+        if not requests:
+            return {"replies": []}
+        return (
+            self.service.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"requests": requests, "includeSpreadsheetInResponse": False},
+            )
+            .execute()
+        )
 
     def read_records(self, range_name: str) -> list[dict[str, str]]:
         """Читає діапазон як список словників (перший рядок — заголовки)."""
