@@ -1,0 +1,63 @@
+name: "Command Center Hub Sync"
+
+on:
+  schedule:
+    # GitHub cron is UTC. These are 08:30/15:30 Kyiv in winter and
+    # 09:30/16:30 Kyiv in summer; both remain after the Secretary passes.
+    - cron: "30 6 * * *"
+    - cron: "30 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: command-center-hub-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+      SECRETARY_SPREADSHEET_ID: ${{ vars.SECRETARY_SPREADSHEET_ID }}
+      HUB_SPREADSHEET_ID: ${{ vars.HUB_SPREADSHEET_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Validate deterministic sync
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate runtime access inputs
+        shell: bash
+        run: |
+          test -n "${GOOGLE_TOKEN:-}"
+          test -n "${SECRETARY_SPREADSHEET_ID:-}"
+          test -n "${HUB_SPREADSHEET_ID:-}"
+
+      - name: Sync Secretary registry to Hub
+        run: >-
+          python -m modules.hub_sync.runner
+          --config modules/hub_sync/production_contract.json
+          --execute
+          --report "$RUNNER_TEMP/hub_sync_report.json"
+
+      - name: Upload sanitized run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-sync-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/hub_sync_report.json
+          if-no-files-found: warn
+          retention-days: 14
