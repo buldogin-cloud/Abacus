@@ -33,12 +33,29 @@ _A1_ROW_RANGE = re.compile(
     r"(?::(?P<end_col>[A-Z]+)(?P<end_row>\d+))?$"
 )
 
+_A1_GRID_RANGE = re.compile(
+    r"^(?:'(?P<sheet>[^']+)'!)?"
+    r"(?P<grid>[A-Z]+\d+(?::[A-Z]+\d+)?)$"
+)
+
 
 def column_index(label: str) -> int:
     result = 0
     for char in label:
         result = result * 26 + (ord(char) - ord("A") + 1)
     return result - 1
+
+
+def qualify_guard_range(sheet: str, configured_range: str) -> str:
+    """Return one validated A1 range without accidentally prefixing it twice."""
+    match = _A1_GRID_RANGE.fullmatch(configured_range.strip())
+    if not match:
+        raise SyncValidationError("Today guard range is not valid A1 notation")
+    configured_sheet = match.group("sheet")
+    if configured_sheet and configured_sheet != sheet:
+        raise SyncValidationError("Today guard range targets a different sheet")
+    escaped_sheet = sheet.replace("'", "''")
+    return f"'{escaped_sheet}'!{match.group('grid')}"
 
 
 def extended_value(value: Any) -> dict[str, Any]:
@@ -247,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         stage = "hub_today_sheet_metadata"
         if today_sheet not in hub_client.get_sheet_ids():
             raise SyncValidationError("Configured Today sheet is unavailable")
-        today_a1 = f"'{today_sheet}'!{today_guard_range}"
+        today_a1 = qualify_guard_range(today_sheet, today_guard_range)
         stage = "hub_today_guard"
         today_formulas_before = hub_client.read_user_entered_values(today_a1)
         config = HubSyncConfig.load_with_private_bootstrap(
