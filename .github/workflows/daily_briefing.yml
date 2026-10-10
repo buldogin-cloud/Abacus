@@ -6,10 +6,16 @@ on:
     - cron: "35 6 * * *"  # 06:35 UTC = 08:35 Europe/Kyiv (VAIT Post-Check)
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   handoff-pipeline:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event.schedule == '0 4 * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref != 'refs/heads/test/radar-google-integration')
     
     steps:
       - name: Checkout
@@ -71,3 +77,59 @@ jobs:
           git add -A
           git diff-index --quiet HEAD || git commit -m "chore: vait-postcheck $(date +'%Y-%m-%d')"
           git push || echo "Nothing to push"
+
+  radar-google-integration:
+    name: Isolated radar Google integration
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/test/radar-google-integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout exact test ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fail-closed scope preflight
+        env:
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/test/radar-google-integration"
+          test -n "${GOOGLE_TOKEN:-}"
+          test -z "${GOOGLE_CREDENTIALS:-}"
+          test -z "${TELEGRAM_BOT_TOKEN:-}"
+          test -z "${TELEGRAM_CHAT_ID:-}"
+          test -z "${GMAIL_APP_PASSWORD:-}"
+          approved="08df0ba05cb61c657b6b457f72a84564e38773fd"
+          git merge-base --is-ancestor "$approved" HEAD
+          actual="$(git diff --name-only "$approved"..HEAD | LC_ALL=C sort)"
+          expected="$(printf '%s\n' \
+            '.github/workflows/daily_briefing.yml' \
+            'tests/manual_google_radar_integration.py' | LC_ALL=C sort)"
+          test "$actual" = "$expected"
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Static validation
+        run: |
+          python -m py_compile tests/manual_google_radar_integration.py
+          python -m unittest discover -s tests -v
+          python tests/manual_google_radar_integration.py
+
+      - name: Run isolated integration once
+        env:
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+          PYTHONWARNINGS: ignore
+        run: python tests/manual_google_radar_integration.py --execute
