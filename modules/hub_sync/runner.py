@@ -326,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         plan = planner.plan(records, history, excluded=exclusions)
         report.update(plan.summary())
+        report.update(planner.diagnostic_summary(records, history))
 
         if not args.execute:
             report.update(status="dry_run_ok", finished_at_utc=utc_now())
