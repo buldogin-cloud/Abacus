@@ -6,6 +6,8 @@ Req 2: пише ТІЛЬКИ в канонічні файли за явними 
 Жодних паралельних копій у теці handoffs.
 """
 
+from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
 
@@ -54,6 +56,12 @@ class CheckpointsWriter:
             True якщо успішно, False якщо помилка
         """
         try:
+            # Never perform a blind overwrite: if the current canonical object
+            # cannot be read, leave it untouched and keep the old window.
+            previous = self.drive.read_file(CHECKPOINTS_FILE_ID)
+            if previous is None:
+                print("❌ Checkpoint pre-read недоступний; запис заблоковано")
+                return False
             content = self._generate_checkpoints_content(sources, status, details or {})
             # Req 2: пишемо за ЯВНИМ ID канонічного файлу.
             file_id = self.drive.update_file_by_id(
@@ -61,9 +69,15 @@ class CheckpointsWriter:
                 content=content,
                 mime_type='text/markdown',
             )
-            if file_id:
+            # update() success is not sufficient: verify that the canonical
+            # object now contains exactly the checkpoint we intended to persist.
+            persisted = self.drive.read_file(CHECKPOINTS_FILE_ID) if file_id else None
+            if file_id and persisted == content:
                 print(f"✅ Канонічний checkpoints.md оновлено: {self.timestamp}")
                 return True
+            if file_id:
+                print("❌ Checkpoint update повернув ID, але read-back не збігся")
+                return False
             print("❌ Помилка оновлення канонічного checkpoints.md")
             return False
         except Exception as e:
@@ -96,6 +110,9 @@ class CheckpointsWriter:
             radar_note = (
                 f"radar_status: {details.get('radar_status', 'unknown')}\n"
                 f"radar_rows_in_tab: {details.get('radar_rows_total', 0)}\n"
+                f"radar_source_verified: {details.get('radar_source_verified', 0)}\n"
+                f"radar_write_verified: {details.get('radar_write_verified', 0)}\n"
+                f"radar_unresolved_count: {details.get('radar_unresolved_count', 0)}\n"
                 f"readback_ok: {details.get('readback_ok', False)}\n"
             )
 

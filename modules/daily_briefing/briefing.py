@@ -216,7 +216,13 @@ def _build_run_detail(
         "radar_rows_total": handoff_result.get("radar_rows_total", 0),
         "radar_rows_added": handoff_result.get("radar_rows_added", 0),
         "radar_rows_updated": handoff_result.get("radar_rows_updated", 0),
+        "radar_rows_unchanged": handoff_result.get("radar_rows_unchanged", 0),
         "radar_confirmed": handoff_result.get("radar_confirmed", 0),
+        "radar_source_verified": handoff_result.get("radar_source_verified", 0),
+        "radar_write_verified": handoff_result.get("radar_write_verified", 0),
+        "radar_persistence_verified": handoff_result.get("radar_persistence_verified", 0),
+        "radar_unresolved_count": handoff_result.get("radar_unresolved_count", 0),
+        "radar_unresolved": handoff_result.get("radar_unresolved", []),
         "radar_fetch_verified": handoff_result.get("radar_fetch_verified", 0),
         "radar_docs_downloaded": handoff_result.get("radar_docs_downloaded", 0),
         "radar_status": handoff_result.get("radar_status", "unknown"),
@@ -321,8 +327,9 @@ def _build_telegram_summary(
         f"~{handoff_result.get('radar_rows_updated', 0)})"
     )
     lines.append(
-        f"  ✅ підтв. read-back: {handoff_result.get('radar_confirmed', 0)} / "
-        f"🌐 джерело перевірено: {handoff_result.get('radar_fetch_verified', 0)}"
+        f"  🌐 source_verified: {handoff_result.get('radar_source_verified', 0)} / "
+        f"💾 write_verified: {handoff_result.get('radar_write_verified', 0)} / "
+        f"⏳ unresolved: {handoff_result.get('radar_unresolved_count', 0)}"
     )
     lines.append(f"  📥 завантажено док.: {handoff_result.get('radar_docs_downloaded', 0)}")
 
@@ -393,6 +400,9 @@ def _print_stdout_stats(
     print(f"    added/updated    : {handoff_result.get('radar_rows_added', 0)}"
           f"/{handoff_result.get('radar_rows_updated', 0)}")
     print(f"    confirmed(rb)    : {handoff_result.get('radar_confirmed', 0)}")
+    print(f"    source_verified  : {handoff_result.get('radar_source_verified', 0)}")
+    print(f"    write_verified   : {handoff_result.get('radar_write_verified', 0)}")
+    print(f"    unresolved       : {handoff_result.get('radar_unresolved_count', 0)}")
     print(f"    fetch_verified   : {handoff_result.get('radar_fetch_verified', 0)}")
     print(f"    docs_downloaded  : {handoff_result.get('radar_docs_downloaded', 0)}")
     print(f"    radar_status     : {handoff_result.get('radar_status', '—')}")
@@ -496,7 +506,10 @@ def main() -> None:
     if args.no_drive:
         radar_result: dict[str, Any] = {
             "radar_rows_total": 0, "radar_rows_added": 0, "radar_rows_updated": 0,
-            "radar_confirmed": 0, "radar_fetch_verified": 0, "radar_docs_downloaded": 0,
+            "radar_rows_unchanged": 0, "radar_confirmed": 0,
+            "radar_source_verified": 0, "radar_write_verified": 0,
+            "radar_persistence_verified": 0, "radar_unresolved_count": 0,
+            "radar_unresolved": [], "radar_fetch_verified": 0, "radar_docs_downloaded": 0,
             "radar_status": "skipped", "readback_ok": True,
             "radar_target": "", "error": None, "errors": [],
         }
@@ -508,7 +521,10 @@ def main() -> None:
             print(f"[✗] Помилка радара: {exc}")
             radar_result = {
                 "radar_rows_total": 0, "radar_rows_added": 0, "radar_rows_updated": 0,
-                "radar_confirmed": 0, "radar_fetch_verified": 0, "radar_docs_downloaded": 0,
+                "radar_rows_unchanged": 0, "radar_confirmed": 0,
+                "radar_source_verified": 0, "radar_write_verified": 0,
+                "radar_persistence_verified": 0, "radar_unresolved_count": 0,
+                "radar_unresolved": [], "radar_fetch_verified": 0, "radar_docs_downloaded": 0,
                 "radar_status": "failed", "readback_ok": False,
                 "radar_target": "", "error": str(exc), "errors": [f"radar: {exc}"],
             }
@@ -524,7 +540,13 @@ def main() -> None:
     handoff_result["radar_rows_total"] = radar_result.get("radar_rows_total", 0)
     handoff_result["radar_rows_added"] = radar_result.get("radar_rows_added", 0)
     handoff_result["radar_rows_updated"] = radar_result.get("radar_rows_updated", 0)
+    handoff_result["radar_rows_unchanged"] = radar_result.get("radar_rows_unchanged", 0)
     handoff_result["radar_confirmed"] = radar_result.get("radar_confirmed", 0)
+    handoff_result["radar_source_verified"] = radar_result.get("radar_source_verified", 0)
+    handoff_result["radar_write_verified"] = radar_result.get("radar_write_verified", 0)
+    handoff_result["radar_persistence_verified"] = radar_result.get("radar_persistence_verified", 0)
+    handoff_result["radar_unresolved_count"] = radar_result.get("radar_unresolved_count", 0)
+    handoff_result["radar_unresolved"] = radar_result.get("radar_unresolved", [])
     handoff_result["radar_fetch_verified"] = radar_result.get("radar_fetch_verified", 0)
     handoff_result["radar_docs_downloaded"] = radar_result.get("radar_docs_downloaded", 0)
     handoff_result["radar_status"] = radar_result.get("radar_status", "unknown")
@@ -571,6 +593,9 @@ def main() -> None:
                 "radar_status": radar_status,
                 "radar_rows_total": handoff_result.get("radar_rows_total", 0),
                 "radar_confirmed": handoff_result.get("radar_confirmed", 0),
+                "radar_source_verified": handoff_result.get("radar_source_verified", 0),
+                "radar_write_verified": handoff_result.get("radar_write_verified", 0),
+                "radar_unresolved_count": handoff_result.get("radar_unresolved_count", 0),
                 "readback_ok": readback_ok,
                 "gmail_connection_verified": gmail_ok,
             }
