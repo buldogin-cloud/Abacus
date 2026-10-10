@@ -145,6 +145,26 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def sanitized_http_error(exc: Exception) -> dict[str, Any]:
+    """Return non-sensitive HTTP diagnostics suitable for public CI logs."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if not isinstance(status, int):
+        return {}
+    category = {
+        400: "invalid_request",
+        401: "authentication",
+        403: "permission_or_scope",
+        404: "resource_unavailable",
+        409: "conflict",
+        429: "rate_limited",
+        500: "google_service_error",
+        502: "google_service_error",
+        503: "google_service_error",
+        504: "google_service_error",
+    }.get(status, "http_error")
+    return {"http_status": status, "http_category": category}
+
+
 def canonical_sha256(value: Any) -> str:
     encoded = json.dumps(
         value,
@@ -189,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": "error",
         "checkpoint_advanced": False,
     }
+    stage = "initialize"
     try:
         source_id = os.environ.get("SECRETARY_SPREADSHEET_ID", "").strip()
         hub_id = os.environ.get("HUB_SPREADSHEET_ID", "").strip()
@@ -205,12 +226,15 @@ def main(argv: list[str] | None = None) -> int:
         mapping_sheet = str(
             public_contract.get("mapping_sheet", "98 — SECRETARY SYNC")
         )
+        stage = "hub_sheet_metadata"
         if mapping_sheet not in hub_client.get_sheet_ids():
             raise SyncValidationError(
                 "Private Hub bootstrap tab is missing; recurring sync cannot create it"
             )
+        stage = "hub_private_bootstrap"
         private_rows = hub_client.read_range(f"'{mapping_sheet}'!A1:O200")
         bootstrap = load_private_bootstrap(private_rows)
+        stage = "hub_verified_log"
         validate_sync_log(
             hub_client.read_range(f"'{mapping_sheet}'!Q1:Z200")
         )
@@ -220,9 +244,11 @@ def main(argv: list[str] | None = None) -> int:
         ).strip()
         if not today_sheet:
             raise SyncValidationError("Private runtime config lacks today_sheet")
+        stage = "hub_today_sheet_metadata"
         if today_sheet not in hub_client.get_sheet_ids():
             raise SyncValidationError("Configured Today sheet is unavailable")
         today_a1 = f"'{today_sheet}'!{today_guard_range}"
+        stage = "hub_today_guard"
         today_formulas_before = hub_client.read_user_entered_values(today_a1)
         config = HubSyncConfig.load_with_private_bootstrap(
             args.config,
@@ -233,11 +259,14 @@ def main(argv: list[str] | None = None) -> int:
                 bootstrap.excluded_anchor_sha256_to_reason
             ),
         )
+        stage = "secretary_sheet_metadata"
         source_sheet_ids = source_client.get_sheet_ids()
         if config.source_sheet not in source_sheet_ids:
             raise SyncValidationError("Secretary source sheet ID is unavailable")
         source_sheet_id = source_sheet_ids[config.source_sheet]
+        stage = "secretary_snapshot_first"
         first_source = source_client.read_range(config.source_range)
+        stage = "secretary_snapshot_second"
         second_source = source_client.read_range(config.source_range)
         if first_source != second_source:
             raise SyncValidationError("Secretary range changed between preflight reads")
@@ -253,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             f"'{config.history_sheet}'!A{config.history_first_row}:"
             f"P{config.history_last_row}"
         )
+        stage = "hub_history"
         history = parse_history(
             hub_client.read_range(history_range),
             config.history_first_row,
@@ -394,8 +424,10 @@ def main(argv: list[str] | None = None) -> int:
         report.update(
             status="error",
             error_type=type(exc).__name__,
+            error_stage=stage,
             finished_at_utc=utc_now(),
         )
+        report.update(sanitized_http_error(exc))
         write_report(args.report, report)
         print(json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1
