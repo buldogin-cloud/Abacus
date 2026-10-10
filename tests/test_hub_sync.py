@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 from modules.hub_sync.config import ConfigError, HubSyncConfig
 from modules.hub_sync.mapping_store import (
@@ -21,6 +22,7 @@ from modules.hub_sync.runner import (
     atomic_requests_for_plan,
     assert_sync_write_boundary,
     qualify_guard_range,
+    read_history,
     sanitized_http_error,
 )
 
@@ -427,6 +429,18 @@ class ConfigTests(unittest.TestCase):
 
 
 class RunnerAndMappingTests(unittest.TestCase):
+    def test_history_is_read_as_unformatted_values(self) -> None:
+        client = Mock()
+        client.read_range.return_value = [[46000.5, *([""] * 15)]]
+
+        rows = read_history(client, "'Synthetic History'!A6:P30", 6)
+
+        client.read_range.assert_called_once_with(
+            "'Synthetic History'!A6:P30",
+            value_render_option="UNFORMATTED_VALUE",
+        )
+        self.assertEqual(rows[0].snapshot[0], 46000.5)
+
     def test_production_contract_and_workflow_contain_no_private_mapping(self) -> None:
         root = Path(__file__).resolve().parents[1]
         contract = json.loads(
