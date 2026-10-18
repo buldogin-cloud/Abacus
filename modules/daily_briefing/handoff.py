@@ -33,6 +33,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from modules.daily_briefing.collector import CollectedData, SourceResult
+from modules.daily_briefing.evidence_quality import assess as assess_evidence
 
 
 # ────────────────────────────────────────────────────────────
@@ -328,6 +329,7 @@ def build_handoff(
         "suggested_check": _suggested_check(classification, link_task),
         "source_verified": record.get("source_verified", False),
         "processing_status": "pending_secretary",
+        "evidence_quality": assess_evidence(record),
 
         # Класифікація (Abacus)
         "classification": classification,  # new_task | update_existing | info_only | needs_review
