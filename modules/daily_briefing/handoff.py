@@ -2,7 +2,7 @@
 handoff.py — Формування та збереження SECRETARY_HANDOFF (Abacus, шар 2).
 
 Відповідальність:
-    - Дедуплікація записів (source_id / message_id / thread_id).
+    - Дедуплікація листів за ID повідомлення та змінних джерел за версією змісту.
     - Зв'язування з реєстром завдань Secretary (read-only).
     - Класифікація кандидата: new_task / update_existing / info_only / needs_review.
     - Запис SECRETARY_HANDOFF у Google Drive → handoffs/secretary/<date>.jsonl
@@ -22,11 +22,13 @@ ChatGPT Secretary читає ці файли та:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
@@ -115,11 +117,9 @@ class Deduplicator:
     """
     Перевірка дублів перед записом SECRETARY_HANDOFF.
 
-    Перевіряє (Req 4):
-        1. source_id;
-        2. message_id / thread_id (для Gmail);
-        3. канонічний URL (для Researcher);
-        4. номер+дата нормативного документа (norm:№|дата).
+    Gmail: source_id / message_id; thread_id залишається лише контекстом.
+    Змінні джерела: SHA256 версії змісту разом із джерелом та ідентичністю.
+    Незмінний ID події/документа не приховує змінений зміст.
 
     Зіставлення з реєстром завдань (Req 3) — СТРОГЕ: лише за достатнім збігом
     значущих слів. Випадкові збіги за одним словом заборонені.
@@ -134,13 +134,12 @@ class Deduplicator:
 
     def is_duplicate(self, record: dict) -> bool:
         """Чи є цей запис дублем вже переданого handoff?"""
-        candidates = [
-            record.get("source_id"),
-            record.get("message_id"),
-            record.get("thread_id"),
-            record.get("url"),
-            _norm_doc_key(record),
-        ]
+        # A thread identifies a conversation, not an individual message.
+        # Thread-level URLs must not suppress later replies either.
+        if record.get("source") == "gmail":
+            candidates = [record.get("source_id"), record.get("message_id")]
+        else:
+            candidates = [_content_version_key(record)]
         return any(c and c in self.existing_handoff_ids for c in candidates)
 
     def find_registry_match(self, record: dict) -> tuple[dict | None, bool]:
@@ -312,12 +311,20 @@ def build_handoff(
         "source_url": record.get("url") or record.get("source_url", ""),
         "category": record.get("category_guess") or record.get("document_type", ""),
         "title": record.get("subject") or record.get("title", ""),
-        "factual_summary": record.get("snippet") or record.get("factual_summary", ""),
+        "factual_summary": record.get("factual_summary") or record.get("snippet", ""),
+        "body": record.get("body", ""),
+        "body_format": record.get("body_format", ""),
+        "body_complete": record.get("body_complete", False),
+        "id_kind": record.get("id_kind", ""),
+        "sender": record.get("sender", ""),
+        "timestamp": record.get("timestamp", ""),
         "explicit_deadline": record.get("explicit_deadline"),
         "people_mentioned": record.get("people_mentioned", []),
         "attachments": {
             "has_attachments": record.get("has_attachments", False),
             "types": record.get("attachment_types", []),
+            "metadata": record.get("attachments", []),
+            "analysis_status": record.get("attachment_analysis_status", "not_analyzed"),
         },
         "related_task_candidate": {
             "task_name": link_task.get("task_name"),
@@ -328,8 +335,9 @@ def build_handoff(
         "reason_for_handoff": _reason(record, classification),
         "suggested_check": _suggested_check(classification, link_task),
         "source_verified": record.get("source_verified", False),
-        "processing_status": "pending_secretary",
         "evidence_quality": assess_evidence(record),
+        "source_content": _source_content(record),
+        "processing_status": "pending_secretary",
 
         # Класифікація (Abacus)
         "classification": classification,  # new_task | update_existing | info_only | needs_review
@@ -342,6 +350,7 @@ def build_handoff(
             "thread_id": record.get("thread_id", ""),
             "url": record.get("url", ""),
             "norm_doc_key": _norm_doc_key(record) or "",
+            "content_version": _content_version_key(record) if source != "gmail" else "",
         },
 
         # Примітка: Secretary є єдиним агентом, що може змінювати реєстр
@@ -383,32 +392,56 @@ def _get_or_create_handoffs_folder(drive) -> str:
     return SECRETARY_FOLDER_ID
 
 
+def _parse_archive(content: str | None) -> list[dict]:
+    """Unreadable or malformed archives must never be treated as empty."""
+    if not isinstance(content, str):
+        raise RuntimeError("Handoff archive could not be read")
+    records = []
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        if not isinstance(obj, dict) or not isinstance(obj.get("_dedup_keys"), dict):
+            raise ValueError("Malformed handoff archive record")
+        records.append(obj)
+    return records
+
+
+# Capture metadata changes each run; calendar's is_today is a view, not an edit.
+_VOLATILE_RECORD_FIELDS = {
+    "detected_at", "checked_at", "collected_at", "run_id", "produced_at",
+    "is_today", "change_status",
+}
+
+
+def _source_content(record: dict) -> dict:
+    return {key: value for key, value in record.items()
+            if key not in _VOLATILE_RECORD_FIELDS}
+
+
+def _content_version_key(record: dict) -> str:
+    """Version mutable sources by their captured content, not stable IDs alone.
+
+    Legacy archives lack this key and intentionally permit one upgrade emission.
+    The source and identity are part of the hash, preventing cross-source clashes.
+    """
+    payload = json.dumps(_source_content(record), ensure_ascii=False,
+                         sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return "content-v1:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _dedup_values(handoff: dict) -> set[str]:
+    keys = handoff["_dedup_keys"]
+    names = ("source_id", "message_id") if handoff.get("source") == "gmail" else ("content_version",)
+    return {keys[k] for k in names if isinstance(keys.get(k), str) and keys[k]}
+
+
 def _load_existing_handoff_ids(drive, folder_id: str, today_filename: str) -> set[str]:
-    """
-    Завантажити source_id вже збережених handoffs за сьогодні
-    (для дедуплікації в межах одного дня).
-    """
-    existing_ids: set[str] = set()
     existing_file = drive.find_file(today_filename, folder_id)
     if not existing_file:
-        return existing_ids
-    try:
-        content = drive.read_file(existing_file["id"])
-        for line in (content or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                keys = obj.get("_dedup_keys", {})
-                for v in keys.values():
-                    if v:
-                        existing_ids.add(v)
-            except json.JSONDecodeError:
-                pass
-    except Exception:
-        pass
-    return existing_ids
+        return set()
+    records = _parse_archive(drive.read_file(existing_file["id"]))
+    return {key for record in records for key in _dedup_values(record)}
 
 
 def _load_recent_handoff_ids(drive, folder_id: str, days: int = 14) -> set[str]:
@@ -421,7 +454,7 @@ def _load_recent_handoff_ids(drive, folder_id: str, days: int = 14) -> set[str]:
     from datetime import timedelta
 
     ids: set[str] = set()
-    today = datetime.now()
+    today = datetime.now(ZoneInfo("Europe/Kyiv"))
     for d in range(days):
         day = today - timedelta(days=d)
         fname = f"handoff_{day.strftime('%Y-%m-%d')}.jsonl"
@@ -477,16 +510,15 @@ def _load_registry_tasks() -> list[dict]:
         # Перетворюємо у стандартний формат
         return [
             {
-                "task_name": t.get("Завдання", ""),
+                "task_name": t.get("Завдання / очікуваний результат") or t.get("Завдання") or t.get("Назва", ""),
                 "status": t.get("Статус", ""),
-                "deadline": t.get("Термін", ""),
+                "deadline": t.get("Строк") or t.get("Термін", ""),
                 "source_id": f"task_row_{t.get('_row', 'unknown')}",
             }
             for t in open_tasks
         ]
     except Exception as exc:
-        print(f"  [⚠] Не вдалося прочитати реєстр завдань: {exc}")
-        return []
+        raise RuntimeError("Secretary registry could not be read") from exc
 
 
 # ────────────────────────────────────────────────────────────
@@ -512,7 +544,7 @@ def process_handoffs(collected: CollectedData) -> dict[str, Any]:
                 "error": str | None,
             }
     """
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%Y-%m-%d")
     today_filename = f"handoff_{today_str}.jsonl"
     result: dict[str, Any] = {
         "handoffs_written": 0,
@@ -557,13 +589,15 @@ def process_handoffs(collected: CollectedData) -> dict[str, Any]:
 
     # Req 4: дедуплікація не лише за сьогодні, а за вікно останніх днів,
     # щоб повторний запуск іншого дня не створював дублі.
-    existing_ids = _load_recent_handoff_ids(drive, folder_id, days=14)
-    print(f"  [i] Відомих dedup-ключів за 14 днів: {len(existing_ids)}")
-
-    # Прочитати реєстр завдань Secretary (read-only)
-    print("  [→] Читання реєстру завдань для зв'язування...")
-    registry_tasks = _load_registry_tasks()
-    print(f"  [i] Завдань у реєстрі: {len(registry_tasks)}")
+    try:
+        existing_ids = _load_recent_handoff_ids(drive, folder_id, days=14)
+        print(f"  [i] Відомих dedup-ключів за 14 днів: {len(existing_ids)}")
+        registry_tasks = _load_registry_tasks()
+    except Exception as exc:
+        result["storage_status"] = "failed"
+        result["error"] = f"Handoff preflight failed: {type(exc).__name__}"
+        result["errors"].append(result["error"])
+        return result
 
     # Ініціалізація дедуплікатора
     dedup = Deduplicator(existing_ids, registry_tasks)
@@ -618,9 +652,7 @@ def process_handoffs(collected: CollectedData) -> dict[str, Any]:
             result["classification_counts"][classification] += 1
 
         # Додаємо ключі до множини (щоб не дублювати в межах цього прогону)
-        for v in handoff["_dedup_keys"].values():
-            if v:
-                existing_ids.add(v)
+        existing_ids.update(_dedup_values(handoff))
 
         if handoff["is_priority"]:
             result["priority_handoffs"] += 1
@@ -633,77 +665,56 @@ def process_handoffs(collected: CollectedData) -> dict[str, Any]:
 
     if not new_handoffs:
         # Немає що писати — але це валідний успішний прогін (нічого нового).
-        result["storage_status"] = "success"
+        result["storage_status"] = "partial" if result["invalid_dropped"] else "success"
         result["handoffs_written"] = 0
-        result["readback_ok"] = True
+        result["readback_ok"] = not result["invalid_dropped"]
         return result
 
     # Сортування: спочатку пріоритетні
     new_handoffs.sort(key=lambda h: (0 if h["is_priority"] else 1, h["produced_at"]))
 
     # Запис на Drive (JSONL — дозапис до існуючого файлу)
-    written_ids = {h["handoff_id"] for h in new_handoffs}
     try:
         existing_file = drive.find_file(today_filename, folder_id)
         existing_content = drive.read_file(existing_file["id"]) if existing_file else ""
-        existing_content = existing_content or ""
-
+        _parse_archive(existing_content)
+        separator = "\n" if existing_content and not existing_content.endswith("\n") else ""
         new_lines = "\n".join(json.dumps(h, ensure_ascii=False) for h in new_handoffs) + "\n"
-        full_content = existing_content + new_lines
+        full_content = existing_content + separator + new_lines
 
-        file_id = drive.write_file(
-            content=full_content,
-            filename=today_filename,
-            parent_id=folder_id,
-            mime_type="text/plain",
-        )
-
-        if not file_id:
-            result["storage_status"] = "failed"
-            result["error"] = "drive.write_file повернув None"
-            result["errors"].append("write_file: None")
-            return result
-
-        # Req 6: READ-BACK — перечитуємо файл і підтверджуємо, що всі записані
-        # handoff_id реально присутні. Лише тоді вважаємо запис доставленим.
-        readback_file = drive.find_file(today_filename, folder_id)
-        readback_content = drive.read_file(readback_file["id"]) if readback_file else ""
-        found_ids: set[str] = set()
-        for line in (readback_content or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                hid = obj.get("handoff_id")
-                if hid:
-                    found_ids.add(hid)
-            except json.JSONDecodeError:
-                pass
-
-        confirmed = written_ids & found_ids
-        result["readback_confirmed"] = len(confirmed)
-
-        if written_ids.issubset(found_ids):
-            result["handoffs_written"] = len(new_handoffs)
-            result["storage_status"] = "success"
-            result["readback_ok"] = True
-            print(
-                f"  [✓] Записано і підтверджено читанням {len(new_handoffs)} "
-                f"handoffs → secretary/{today_filename}"
+        # Detect changes since the preflight read. The workflow must also
+        # serialize writers: Drive does not offer an atomic append here.
+        prewrite_file = drive.find_file(today_filename, folder_id)
+        if (prewrite_file or {}).get("id") != (existing_file or {}).get("id"):
+            raise RuntimeError("Handoff archive changed before write")
+        if existing_file:
+            if drive.read_file(existing_file["id"]) != existing_content:
+                raise RuntimeError("Handoff archive changed before write")
+            file_id = drive.update_file_by_id(
+                file_id=existing_file["id"], content=full_content, mime_type="text/plain"
             )
         else:
-            # Запис пройшов, але read-back не підтвердив усі записи — чесно partial.
-            missing = written_ids - found_ids
-            result["handoffs_written"] = len(confirmed)
+            file_id = drive.write_file(
+                content=full_content, filename=today_filename,
+                parent_id=folder_id, mime_type="text/plain",
+            )
+        if not file_id:
+            raise RuntimeError("Handoff write did not return a file ID")
+        if existing_file and file_id != existing_file["id"]:
+            raise RuntimeError("Handoff write returned an unexpected file ID")
+
+        # Verify all bytes, including previous records, not just newly added IDs.
+        readback_content = drive.read_file(file_id)
+        if readback_content == full_content:
+            result["handoffs_written"] = len(new_handoffs)
+            result["readback_confirmed"] = len(new_handoffs)
+            result["storage_status"] = "partial" if result["invalid_dropped"] else "success"
+            result["readback_ok"] = not result["invalid_dropped"]
+        else:
             result["storage_status"] = "partial"
             result["readback_ok"] = False
-            result["error"] = (
-                f"read-back підтвердив {len(confirmed)}/{len(written_ids)}; "
-                f"не знайдено {len(missing)}"
-            )
+            result["error"] = "Handoff content read-back mismatch"
             result["errors"].append(result["error"])
-            print(f"  [⚠] Read-back неповний: {len(confirmed)}/{len(written_ids)}")
 
     except Exception as exc:
         result["storage_status"] = "failed"
@@ -711,3 +722,4 @@ def process_handoffs(collected: CollectedData) -> dict[str, Any]:
         result["errors"].append(f"write/readback: {exc}")
 
     return result
+

@@ -29,6 +29,7 @@ ChatGPT Secretary читає handoff → оновлює реєстр → фор�
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,7 @@ import yaml
 _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from modules.daily_briefing.checkpoints_util import CheckpointsReader    # noqa: E402
+from modules.daily_briefing.checkpoints_util import CheckpointsReader, earliest_checkpoint_timestamp    # noqa: E402
 from modules.daily_briefing.checkpoints_writer import CheckpointsWriter  # noqa: E402
 from modules.daily_briefing.collector import CollectedData, collect_all  # noqa: E402
 from modules.daily_briefing.handoff import process_handoffs              # noqa: E402
@@ -106,7 +107,7 @@ def get_window_start(checkpoints: dict) -> str:
         return fallback
 
     # Найстаріший timestamp — найширше вікно → нічого не пропустимо
-    return min(timestamps)
+    return earliest_checkpoint_timestamp(timestamps)
 
 
 # ────────────────────────────────────────────────────────────
@@ -141,6 +142,8 @@ def compute_run_status(collected: CollectedData, handoff_result: dict) -> str:
     Інакше — partial (або failed, якщо все впало).
     """
     overall = collected.overall_status()
+    if not {"gmail", "calendar", "tasks", "researcher"}.issubset(collected.sources):
+        return "failed"
     storage = handoff_result.get("storage_status", "unknown")
     readback_ok = handoff_result.get("readback_ok", False)
     radar_status = handoff_result.get("radar_status", "unknown")
@@ -153,9 +156,12 @@ def compute_run_status(collected: CollectedData, handoff_result: dict) -> str:
     all_ok = (
         gmail_ok
         and overall == "success"
-        and storage in ("success", "skipped")
+        and storage == "success"
         and readback_ok
         and radar_status in ("success", "skipped")
+        and handoff_result.get("radar_readback_ok", False)
+        and not handoff_result.get("errors")
+        and not handoff_result.get("error")
     )
     return "success" if all_ok else "partial"
 
@@ -421,7 +427,17 @@ def _print_stdout_stats(
 # Головна логіка
 # ────────────────────────────────────────────────────────────
 
-def main() -> None:
+def write_health_report(path: str | None, status: str, **details) -> None:
+    """Sanitized operational evidence only: never message bodies or exceptions."""
+    if path:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps({"status": status, **details}, indent=2) + "\n")
+        temporary.replace(target)
+
+
+def main(argv: list[str] | None = None) -> int:
     """Точка входу оркестратора handoff-пайплайну."""
     parser = argparse.ArgumentParser(
         description="Abacus — handoff-пайплайн (фоновий технічний агент)"
@@ -435,7 +451,8 @@ def main() -> None:
         "--no-drive", action="store_true",
         help="Пропустити запис у Drive (режим тестування)"
     )
-    args = parser.parse_args()
+    parser.add_argument("--report", help="Sanitized local operational JSON report")
+    args = parser.parse_args(argv)
 
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     print(f"\n{'=' * 60}")
@@ -449,10 +466,12 @@ def main() -> None:
     print("[→] Завантаження checkpoints з Drive...")
     try:
         reader = CheckpointsReader()
-        checkpoints = reader.load_from_drive() or {}
+        checkpoints = reader.load_from_drive(strict=True)
     except Exception as exc:
-        print(f"[!] Помилка читання checkpoints: {exc} → defaults")
-        checkpoints = {}
+        print("[✗] Canonical checkpoint unavailable; refusing an unverified fallback window")
+        write_health_report(args.report, "failed", error_stage="checkpoint_read",
+                            error_type=type(exc).__name__)
+        return 1
 
     window_start = get_window_start(checkpoints)
     print(f"[✓] window_start = {window_start}")
@@ -463,7 +482,9 @@ def main() -> None:
         collected = collect_all(config, window_start)
     except Exception as exc:
         print(f"[✗] Критична помилка Collector: {exc}")
-        sys.exit(1)
+        write_health_report(args.report, "failed", error_stage="collection",
+                            error_type=type(exc).__name__)
+        return 1
 
     print(f"[✓] Collector завершено: {collected.overall_status()}")
 
@@ -564,6 +585,7 @@ def main() -> None:
 
     # ── КРОКИ 5–6: Checkpoints + Automation Log ──────────────
     writer: CheckpointsWriter | None = None
+    persistence_ok = True
 
     if not args.no_drive:
         # КРОК 5: Оновити checkpoints.
@@ -578,9 +600,11 @@ def main() -> None:
         # тож і checkpoints не просуваємо.
         storage_fully_ok = (
             gmail_ok
+            and run_status == "success"
             and storage_status == "success"
             and readback_ok
             and radar_status in ("success", "skipped")
+            and handoff_result.get("radar_readback_ok", False)
         )
 
         print("\n[→] Оновлення checkpoints...")
@@ -598,6 +622,7 @@ def main() -> None:
                 "radar_unresolved_count": handoff_result.get("radar_unresolved_count", 0),
                 "readback_ok": readback_ok,
                 "gmail_connection_verified": gmail_ok,
+                "captured_until": started_at,
             }
             if storage_fully_ok:
                 sources_status = _sources_status_dict(collected)
@@ -605,6 +630,7 @@ def main() -> None:
                     print("[✓] Checkpoints оновлено")
                 else:
                     print("[!] update_checkpoints повернув False")
+                    persistence_ok = False
             else:
                 print(
                     f"[⛔] Checkpoints НЕ просунуто: gmail_ok={gmail_ok}, "
@@ -614,6 +640,7 @@ def main() -> None:
         except Exception as exc:
             print(f"[!] Помилка оновлення checkpoints: {exc}")
             writer = None
+            persistence_ok = False
 
         # Для логів/Telegram потрібен writer навіть коли checkpoints не просунуто.
         if writer is None:
@@ -621,6 +648,9 @@ def main() -> None:
                 writer = CheckpointsWriter()
             except Exception:
                 writer = None
+
+        if not persistence_ok:
+            run_status = "failed"
 
         if writer is not None:
             # КРОК 6a: Детальний лог прогону (handoff_runs.jsonl на Drive)
@@ -632,17 +662,20 @@ def main() -> None:
                     started_at=started_at,
                     finished_at=finished_at,
                 )
+                run_detail["overall_status"] = run_status
                 if writer.log_handoff_run(run_detail):
                     print("[✓] handoff_runs.jsonl оновлено")
                 else:
                     print("[!] log_handoff_run повернув False")
+                    persistence_ok = False
             except Exception as exc:
                 print(f"[!] Помилка log_handoff_run: {exc}")
+                persistence_ok = False
 
             # КРОК 6b: Рядок у зведеній таблиці automation_log.md
             try:
                 # Req 5/6: статус рядка = чесний підсумковий статус прогону.
-                log_status = run_status
+                log_status = run_status if persistence_ok else "failed"
 
                 sources_line = " | ".join(
                     f"{s}:{r.status}({len(r.records)})"
@@ -665,8 +698,13 @@ def main() -> None:
                     print("[✓] automation_log.md оновлено")
                 else:
                     print("[!] append_to_automation_log повернув False")
+                    persistence_ok = False
             except Exception as exc:
                 print(f"[!] Помилка automation_log: {exc}")
+                persistence_ok = False
+
+    if not persistence_ok:
+        run_status = "failed"
 
     # ── КРОК 7: Telegram summary ─────────────────────────────
     delivery = config.get("delivery", {})
@@ -696,8 +734,22 @@ def main() -> None:
             finished_at=finished_at,
         )
 
-    print(f"\n[✓] Abacus — Handoff Pipeline завершено [{finished_at}]\n")
+    if args.no_drive:
+        run_status = "dry_run_ok" if collected.overall_status() == "success" else "failed"
+    write_health_report(
+        args.report, run_status, started_at=started_at, finished_at=finished_at,
+        mode="dry_run" if args.no_drive else "execute",
+        sources={key: {"status": result.status, "count": len(result.records)}
+                 for key, result in collected.sources.items()},
+        storage_status=handoff_result.get("storage_status", "unknown"),
+        readback_ok=bool(handoff_result.get("readback_ok", False)),
+        radar_status=handoff_result.get("radar_status", "unknown"),
+        persistence_ok=persistence_ok,
+    )
+    print(f"\nAbacus — Handoff Pipeline: {run_status.upper()} [{finished_at}]\n")
+    return 0 if run_status in ("success", "dry_run_ok") else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+

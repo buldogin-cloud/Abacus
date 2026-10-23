@@ -81,7 +81,7 @@ class CheckpointsWriter:
             print("❌ Помилка оновлення канонічного checkpoints.md")
             return False
         except Exception as e:
-            print(f"❌ Помилка запису checkpoints: {e}")
+            print(f"❌ Помилка запису checkpoints: {type(e).__name__}")
             return False
 
     def _status_value(self, ok: bool, run_status: str) -> str:
@@ -101,9 +101,16 @@ class CheckpointsWriter:
             'failed': '❌',
         }.get(status, '?')
 
+        # Advance only to the conservative start of capture, never write time.
+        watermark = details.get("captured_until", self.timestamp)
+        captured = datetime.fromisoformat(watermark.replace("Z", "+00:00"))
+        if captured.tzinfo is None or captured > self.now_utc:
+            raise ValueError("Invalid capture watermark")
+        watermark = captured.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
         def ts(ok: bool) -> str:
             # Просуваємо _last_success лише для реально підтверджених джерел.
-            return self.timestamp if ok else 'N/A'
+            return watermark if ok else 'N/A'
 
         radar_note = ""
         if details:
@@ -174,6 +181,8 @@ researcher_status: {self._status_value(sources.get('researcher'), status)}
         """
         try:
             current_content = self.drive.read_file(AUTOMATION_LOG_FILE_ID)
+            if current_content is None:
+                return False
             if not current_content:
                 current_content = self._generate_automation_log_header()
 
@@ -196,12 +205,12 @@ researcher_status: {self._status_value(sources.get('researcher'), status)}
                 content=updated,
                 mime_type='text/markdown',
             )
-            if file_id:
+            if file_id and self.drive.read_file(AUTOMATION_LOG_FILE_ID) == updated:
                 print(f"✅ Канонічний automation_log.md: {event['task']}")
                 return True
             return False
         except Exception as e:
-            print(f"❌ Помилка логу: {e}")
+            print(f"❌ Помилка логу: {type(e).__name__}")
             return False
 
     def log_handoff_run(self, run_detail: dict) -> bool:
@@ -210,22 +219,27 @@ researcher_status: {self._status_value(sources.get('researcher'), status)}
         Кожен рядок — JSON одного прогону.
         """
         try:
-            current_content = self.drive.read_file(HANDOFF_RUNS_FILE_ID) or ""
+            current_content = self.drive.read_file(HANDOFF_RUNS_FILE_ID)
+            if current_content is None:
+                return False
+            for line in current_content.splitlines():
+                if line.strip() and not isinstance(json.loads(line), dict):
+                    return False
             new_line = json.dumps(run_detail, ensure_ascii=False) + "\n"
-            updated = current_content + new_line
+            updated = current_content + ("\n" if current_content and not current_content.endswith("\n") else "") + new_line
 
             file_id = self.drive.update_file_by_id(
                 file_id=HANDOFF_RUNS_FILE_ID,
                 content=updated,
                 mime_type="text/plain",
             )
-            if file_id:
+            if file_id and self.drive.read_file(HANDOFF_RUNS_FILE_ID) == updated:
                 print(f"✅ handoff_runs.jsonl: {run_detail.get('run_id', '?')} записано")
                 return True
             print("❌ log_handoff_run: update_file_by_id повернув None")
             return False
         except Exception as exc:
-            print(f"❌ log_handoff_run: {exc}")
+            print(f"❌ log_handoff_run: {type(exc).__name__}")
             return False
 
     def _generate_automation_log_header(self) -> str:
@@ -244,3 +258,4 @@ researcher_status: {self._status_value(sources.get('researcher'), status)}
 |-----------|--------|--------|-----------|------|
 
 """
+

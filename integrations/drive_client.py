@@ -41,16 +41,18 @@ class DriveClient:
         try:
             results = self.service.files().list(
                 q=query,
-                fields='files(id, name, mimeType, parents, modifiedTime)',
-                pageSize=1
+                fields='nextPageToken, files(id, name, mimeType, parents, modifiedTime)',
+                pageSize=2
             ).execute()
-            
-            files = results.get('files', [])
-            return files[0] if files else None
-        except Exception as e:
-            print(f"❌ Помилка пошуку файлу: {e}")
-            return None
-    
+        except Exception:
+            # A failed lookup must never be treated as absence and create a duplicate.
+            # Provider exceptions can contain URLs, payloads or credential material.
+            raise RuntimeError("Drive filename lookup failed") from None
+        files = results.get('files', [])
+        if len(files) > 1 or results.get('nextPageToken'):
+            raise RuntimeError("Ambiguous Drive filename; use a verified file ID")
+        return files[0] if files else None
+
     def read_file(self, file_id):
         """
         Прочитати вміст текстового файлу
@@ -73,7 +75,7 @@ class DriveClient:
             fh.seek(0)
             return fh.read().decode('utf-8')
         except Exception as e:
-            print(f"❌ Помилка читання файлу: {e}")
+            print(f"❌ Помилка читання файлу: {type(e).__name__}")
             return None
     
     def write_file(self, content, filename, parent_id, mime_type='text/markdown'):
@@ -121,7 +123,7 @@ class DriveClient:
             
             return file.get('id')
         except Exception as e:
-            print(f"❌ Помилка запису файлу: {e}")
+            print(f"❌ Помилка запису файлу: {type(e).__name__}")
             return None
 
     def update_file_by_id(self, file_id, content, mime_type='text/markdown'):
@@ -152,7 +154,7 @@ class DriveClient:
             ).execute()
             return file.get('id', file_id)
         except Exception as e:
-            print(f"❌ Помилка оновлення файлу {file_id}: {e}")
+            print(f"❌ Помилка оновлення файлу: {type(e).__name__}")
             return None
 
     def trash_file(self, file_id):
@@ -169,7 +171,7 @@ class DriveClient:
             ).execute()
             return True
         except Exception as e:
-            print(f"❌ Помилка переміщення у кошик {file_id}: {e}")
+            print(f"❌ Помилка переміщення у кошик: {type(e).__name__}")
             return False
 
     def delete_file(self, file_id):
@@ -186,5 +188,6 @@ class DriveClient:
             self.service.files().delete(fileId=file_id).execute()
             return True
         except Exception as e:
-            print(f"❌ Помилка видалення файлу: {e}")
+            print(f"❌ Помилка видалення файлу: {type(e).__name__}")
             return False
+

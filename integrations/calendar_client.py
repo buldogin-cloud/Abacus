@@ -31,18 +31,20 @@ class CalendarClient:
     # ------------------------------------------------------------------ #
     def _fetch_events(self, time_min: datetime, time_max: datetime) -> list[dict[str, Any]]:
         """Повертає події у заданому проміжку часу, впорядковані за початком."""
-        response = (
-            self.service.events()
-            .list(
-                calendarId=self.calendar_id,
-                timeMin=time_min.isoformat(),
-                timeMax=time_max.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        )
-        return [self._format_event(e) for e in response.get("items", [])]
+        events, token, seen_tokens = [], None, set()
+        while True:
+            kwargs = dict(calendarId=self.calendar_id, timeMin=time_min.isoformat(),
+                          timeMax=time_max.isoformat(), singleEvents=True, orderBy="startTime")
+            if token:
+                kwargs["pageToken"] = token
+            response = self.service.events().list(**kwargs).execute()
+            events.extend(self._format_event(e) for e in response.get("items", []))
+            token = response.get("nextPageToken")
+            if not token:
+                return events
+            if token in seen_tokens:
+                raise RuntimeError("Calendar pagination repeated a token; collection incomplete")
+            seen_tokens.add(token)
 
     @staticmethod
     def _format_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -53,6 +55,8 @@ class CalendarClient:
             "id": event.get("id"),
             "summary": event.get("summary", "(без назви)"),
             "location": event.get("location", ""),
+            "description": event.get("description", ""),
+            "htmlLink": event.get("htmlLink", ""),
             "start": start.get("dateTime", start.get("date", "")),
             "end": end.get("dateTime", end.get("date", "")),
             "all_day": "date" in start,
@@ -86,3 +90,4 @@ if __name__ == "__main__":
     print("Події на сьогодні:")
     for e in client.get_today_events():
         print(f"  • {e['start']} — {e['summary']}")
+

@@ -6,9 +6,17 @@ on:
     - cron: "35 6 * * *"  # 06:35 UTC = 08:35 Europe/Kyiv (VAIT Post-Check)
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: abacus-handoff-persistence
+  cancel-in-progress: false
+
 jobs:
   handoff-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch'
     
     steps:
@@ -27,23 +35,26 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           echo "🚀 Abacus Handoff Pipeline — збір → дедуплікація → класифікація → Drive"
-          python modules/daily_briefing/briefing.py
+          python modules/daily_briefing/briefing.py --report "$RUNNER_TEMP/handoff_health.json"
           echo "✅ Handoff створено. Secretary обробить на стороні ChatGPT."
 
-      - name: Archive Logs (Optional)
-        run: |
-          git config user.email "abacus@github.local"
-          git config user.name "Abacus Agent"
-          git add -A
-          git diff-index --quiet HEAD || git commit -m "chore: handoff pipeline logs $(date +'%Y-%m-%d')" || true
-          git push || echo "No changes to push"
+      - name: Upload sanitized health report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: handoff-health-${{ github.run_id }}
+          path: ${{ runner.temp }}/handoff_health.json
+          if-no-files-found: warn
+          retention-days: 14
 
   vait-postcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event.schedule == '35 6 * * *'
     
     steps:
@@ -64,10 +75,3 @@ jobs:
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
         run: python modules/daily_briefing/vait_postcheck.py
 
-      - name: Commit & Push
-        run: |
-          git config user.email "abacus@github.local"
-          git config user.name "Abacus Agent"
-          git add -A
-          git diff-index --quiet HEAD || git commit -m "chore: vait-postcheck $(date +'%Y-%m-%d')"
-          git push || echo "Nothing to push"
