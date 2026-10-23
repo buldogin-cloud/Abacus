@@ -3,9 +3,33 @@
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from integrations.drive_client import DriveClient
 from modules.daily_briefing.canonical import CHECKPOINTS_FILE_ID
+
+
+def parse_checkpoint_timestamp(value, now=None):
+    """Validate an aware, non-future watermark and normalize its instant to UTC."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        raise RuntimeError("Checkpoint timestamp is invalid") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("Checkpoint lacks timezone")
+    parsed = parsed.astimezone(timezone.utc)
+    boundary = now if now is not None else datetime.now(timezone.utc)
+    if boundary.tzinfo is None or boundary.utcoffset() is None:
+        raise ValueError("Validation time must include timezone")
+    if parsed > boundary.astimezone(timezone.utc):
+        raise RuntimeError("Checkpoint is in the future")
+    return parsed
+
+
+def earliest_checkpoint_timestamp(timestamps, now=None):
+    """Compare instants, not lexicographic ISO strings with different offsets."""
+    boundary = now if now is not None else datetime.now(timezone.utc)
+    earliest = min(parse_checkpoint_timestamp(value, boundary) for value in timestamps)
+    return earliest.isoformat().replace("+00:00", "Z")
 
 
 class CheckpointsReader:
@@ -16,7 +40,7 @@ class CheckpointsReader:
         self.drive = DriveClient()
         self.checkpoints = {}
     
-    def load_from_drive(self):
+    def load_from_drive(self, strict=False):
         """
         Завантажити checkpoints з Drive.
 
@@ -33,17 +57,21 @@ class CheckpointsReader:
 
             if not content:
                 print("⚠️ Не вдалося прочитати канонічний checkpoints.md")
+                if strict:
+                    raise RuntimeError("Canonical checkpoint is unreadable")
                 return self._get_defaults()
             
             # Парсимо YAML з markdown
-            self.checkpoints = self._parse_checkpoints(content)
+            self.checkpoints = self._parse_checkpoints(content, strict=strict)
             return self.checkpoints
             
         except Exception as e:
-            print(f"❌ Помилка завантаження checkpoints: {e}")
+            if strict:
+                raise RuntimeError("Canonical checkpoint could not be verified") from e
+            print(f"❌ Помилка завантаження checkpoints: {type(e).__name__}")
             return self._get_defaults()
     
-    def _parse_checkpoints(self, content):
+    def _parse_checkpoints(self, content, strict=False):
         """
         Парсинг checkpoints з markdown/yaml
         
@@ -59,6 +87,8 @@ class CheckpointsReader:
         yaml_match = re.search(r'```yaml\n(.*?)\n```', content, re.DOTALL)
         
         if not yaml_match:
+            if strict:
+                raise RuntimeError("Checkpoint YAML block missing")
             return self._get_defaults()
         
         yaml_content = yaml_match.group(1)
@@ -81,6 +111,10 @@ class CheckpointsReader:
                 if key.endswith('_last_success'):
                     checkpoints[key] = value
         
+        if strict:
+            for key in ("gmail", "calendar", "tasks", "researcher"):
+                value = checkpoints.get(key + "_last_success", "")
+                parse_checkpoint_timestamp(value)
         return checkpoints if checkpoints else self._get_defaults()
     
     def _get_defaults(self):
@@ -114,3 +148,4 @@ class CheckpointsReader:
             ISO timestamp string
         """
         return self.checkpoints.get(key, self._get_defaults()[key])
+

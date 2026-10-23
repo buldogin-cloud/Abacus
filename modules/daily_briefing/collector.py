@@ -57,6 +57,8 @@ class CollectedData:
     def overall_status(self) -> str:
         """Загальний статус прогону на основі статусів джерел."""
         statuses = [s.status for s in self.sources.values()]
+        if not statuses:
+            return "failed"
         if all(s == "success" for s in statuses):
             return "success"
         if all(s in ("failed", "source_unavailable") for s in statuses):
@@ -87,7 +89,8 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
     Збирає лише:
         message_id, thread_id, sender, recipients, subject,
         timestamp, has_attachments, attachment_types,
-        snippet (перші 200 символів), labels, category_guess.
+        snippet, повний body, метадані вкладень (без аналізу), labels, category_guess.
+    Обсяг: INBOX, включно з прочитаними листами; архів не охоплений.
 
     НЕ визначає:
         - чи є лист новим завданням;
@@ -95,7 +98,6 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
         - статус завдань.
     """
     checked_at = _utc_now_iso()
-    days = cfg.get("lookback_days", 1)
     limit = cfg.get("max_messages", 20)
 
     try:
@@ -133,8 +135,7 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
     seen_ids: set[str] = set()
 
     try:
-        unread = gmail.get_unread_messages(days=days, max_results=limit)
-        important = gmail.get_important_messages(days=days, max_results=limit)
+        messages = gmail.get_recent_messages(window_start=window_start, max_results=limit)
     except Exception as exc:
         return SourceResult(
             source="gmail",
@@ -147,7 +148,9 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
             connection_verified=connection_verified,
         )
 
-    for msg in unread + important:
+    for msg in messages:
+        if msg.get("is_draft") or msg.get("is_sent"):
+            continue
         msg_id = msg.get("id") or msg.get("message_id") or msg.get("subject", "")
         if msg_id in seen_ids:
             continue
@@ -160,25 +163,33 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
         record = {
             "source": "gmail",
             "source_id": msg_id,
-            "message_id": msg.get("id", ""),
+            "message_id": msg.get("message_id", ""),
+            "id_kind": msg.get("id_kind", ""),
+            "url": msg.get("url", ""),
             "thread_id": msg.get("threadId", ""),
             "sender": msg.get("from", ""),
             "recipients": msg.get("to", ""),
             "subject": msg.get("subject", ""),
             "timestamp": msg.get("date", ""),
+            "received_internaldate": msg.get("internaldate", ""),
             "detected_at": checked_at,
             "labels": msg.get("labels", []),
             "has_attachments": bool(msg.get("attachments")),
             "attachment_types": [a.get("type", "") for a in msg.get("attachments", [])],
             "snippet": (msg.get("snippet") or "")[:200],
+            "body": msg.get("body", ""),
+            "body_format": msg.get("body_format", ""),
+            "body_complete": msg.get("body_complete", False),
+            "attachments": msg.get("attachments", []),
+            "attachment_analysis_status": "not_analyzed",
             # Req 2: factual_summary не має бути порожнім. Для листа —
             # це тема + перший фрагмент тексту (фактичний зміст, без інтерпретації).
             "factual_summary": (
                 f"{msg.get('subject', '').strip()} — {(msg.get('snippet') or '').strip()}"
             ).strip(" —") or (msg.get("subject", "").strip()),
             "category_guess": category_guess,
-            "is_unread": msg in unread,
-            "is_important": msg in important,
+            "is_unread": msg.get("is_unread", False),
+            "is_important": msg.get("is_important", False),
             # Поля для Secretary
             "people_mentioned": [],   # Secretary заповнить
             "explicit_deadline": None,  # Secretary визначить
@@ -188,7 +199,9 @@ def collect_gmail(cfg: dict[str, Any], window_start: str) -> SourceResult:
 
     return SourceResult(
         source="gmail",
-        status="success",
+        status="partial" if gmail.last_collection.get("truncated") else "success",
+        error="Gmail collection capped; checkpoint must not advance" if gmail.last_collection.get("truncated") else None,
+        meta=dict(gmail.last_collection),
         checked_at=checked_at,
         window_start=window_start,
         window_end=checked_at,
@@ -619,3 +632,4 @@ def _log_source(result: SourceResult) -> None:
     count = len(result.records)
     err = f" | ПОМИЛКА: {result.error}" if result.error else ""
     print(f"  [{icon}] {result.source}: {result.status}, записів: {count}{err}")
+
