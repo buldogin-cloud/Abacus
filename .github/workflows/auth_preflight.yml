@@ -1,0 +1,28 @@
+name: Command Center Read-only Access Preflight
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  read-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install existing dependencies
+        run: pip install -q -r requirements.txt
+      - name: Check existing grant and metadata reads only
+        env:
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+        run: python -m modules.command_center.auth_preflight --report "$RUNNER_TEMP/auth_preflight.json"
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-preflight-${{ github.run_id }}
+          path: ${{ runner.temp }}/auth_preflight.json
+          if-no-files-found: error
+          retention-days: 14
