@@ -2,8 +2,11 @@ name: "Abacus Handoff Pipeline & Automation"
 
 on:
   schedule:
-    - cron: "0 4 * * *"   # 04:00 UTC = 07:00 Europe/Kyiv (Handoff Pipeline)
-    - cron: "35 6 * * *"  # 06:35 UTC = 08:35 Europe/Kyiv (VAIT Post-Check)
+    # Paired UTC slots; timezone guard runs exactly one slot per Kyiv day.
+    - cron: "0 4 * * *"
+    - cron: "0 5 * * *"
+    - cron: "35 5 * * *"
+    - cron: "35 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,7 +20,7 @@ jobs:
   handoff-pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event.schedule == '0 4 * * *' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '0 4 * * *' || github.event.schedule == '0 5 * * *' || github.event_name == 'workflow_dispatch'
     
     steps:
       - name: Checkout
@@ -28,10 +31,24 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Check Kyiv schedule
+        id: schedule
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=$(python -m modules.command_center.schedule handoff --cron "$EVENT_SCHEDULE")" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install dependencies
+        if: steps.schedule.outputs.run == 'true'
         run: pip install -q -r requirements.txt
 
       - name: Run Handoff Pipeline
+        if: steps.schedule.outputs.run == 'true'
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
@@ -41,10 +58,10 @@ jobs:
         run: |
           echo "🚀 Abacus Handoff Pipeline — збір → дедуплікація → класифікація → Drive"
           python modules/daily_briefing/briefing.py --report "$RUNNER_TEMP/handoff_health.json"
-          echo "✅ Handoff створено. Secretary обробить на стороні ChatGPT."
+          echo "Capture finished; Secretary processing and delivery remain independently unverified."
 
       - name: Upload sanitized health report
-        if: always()
+        if: always() && steps.schedule.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: handoff-health-${{ github.run_id }}
@@ -54,24 +71,26 @@ jobs:
 
   vait-postcheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    if: github.event.schedule == '35 6 * * *'
-    
+    timeout-minutes: 5
+    if: github.event.schedule == '35 5 * * *' || github.event.schedule == '35 6 * * *'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -q -r requirements.txt
-
-      - name: VAIT Post-Briefing Control
+      - name: Check Kyiv schedule
+        id: schedule
         env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
-        run: python modules/daily_briefing/vait_postcheck.py
-
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: echo "run=$(python -m modules.command_center.schedule vait_postcheck --cron "$EVENT_SCHEDULE")" >> "$GITHUB_OUTPUT"
+      - name: Verify VAIT receipts (blocked until a verified manifest is wired)
+        if: steps.schedule.outputs.run == 'true'
+        run: python -m modules.daily_briefing.vait_postcheck --report "$RUNNER_TEMP/vait_health.json"
+      - name: Upload sanitized VAIT check status
+        if: always() && steps.schedule.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vait-health-${{ github.run_id }}
+          path: ${{ runner.temp }}/vait_health.json
+          if-no-files-found: warn
+          retention-days: 14

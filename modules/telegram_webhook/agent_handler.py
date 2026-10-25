@@ -1,5 +1,7 @@
 """Обробник повідомлень через Abacus LLM з реальними даними з Google Sheets (REST API)."""
 
+from modules.command_center.health import STATUS_TEXT, BRIEFING_TEXT
+
 import os
 import sys
 import json
@@ -256,9 +258,9 @@ def _fallback_response(text: str) -> str:
     if any(w in t for w in ['привіт', 'hello', 'добрий']):
         return '👋 Привіт, Андрію!'
     elif 'статус' in t:
-        return '✅ Система працює!\n⏰ Брифінг: щодня о 06:00\n📧 Email: підключено'
+        return STATUS_TEXT
     elif 'брифінг' in t:
-        return '📋 Брифінг формується щодня о 06:00 і надходить на andrewbelin6@gmail.com'
+        return BRIEFING_TEXT
     elif 'дяку' in t:
         return 'Будь ласка! 😊'
     else:

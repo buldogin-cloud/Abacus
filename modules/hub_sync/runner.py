@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from modules.command_center.health import safe_auth_diagnostic
 from modules.hub_sync.config import HubSyncConfig, pad
 from modules.hub_sync.model import HistoryRow
 from modules.hub_sync.mapping_store import (
@@ -463,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
             finished_at_utc=utc_now(),
         )
         report.update(sanitized_http_error(exc))
+        report.update(safe_auth_diagnostic(exc))
         write_report(args.report, report)
         print(json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1

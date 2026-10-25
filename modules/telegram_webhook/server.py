@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from modules.telegram_webhook.agent_handler import get_agent_response
+from modules.command_center.health import STATUS_TEXT, BRIEFING_TEXT
 
 # Налаштування Flask
 app = Flask(__name__)
@@ -108,9 +109,9 @@ def webhook():
                     "💬 Можете писати текстом або 🎤 надіслати голосове повідомлення — я його розпізнаю і відповім!"
                 )
             elif text == '/status':
-                reply = "✅ Система працює!\n\nWebhook: активний\nBrief: щодня о 06:00 Kyiv\nEmail: andrewbelin6@gmail.com"
+                reply = STATUS_TEXT
             elif text == '/briefing':
-                reply = "📋 Щоденний брифінг генерується о 06:00 за Київським часом і надходить на andrewbelin6@gmail.com та зберігається в Google Drive."
+                reply = BRIEFING_TEXT
             else:
                 reply = f"❓ Невідома команда. Введіть /help"
         else:
@@ -124,22 +125,10 @@ def webhook():
         return jsonify({"ok": True})  # Завжди повертаємо 200 Telegram
 
 
-@app.route('/send-test', methods=['GET'])
-def send_test():
-    """Debug: надіслати тестове повідомлення."""
-    ok = send_message(CHAT_ID, "🔧 Тест з Render сервера — сервер надсилає повідомлення!")
-    token_set = bool(BOT_TOKEN)
-    return jsonify({
-        "token_set": token_set,
-        "token_prefix": BOT_TOKEN[:10] + "..." if BOT_TOKEN else "EMPTY",
-        "message_sent": ok,
-        "chat_id": CHAT_ID
-    })
-
-
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "token_set": bool(BOT_TOKEN)})
+    return jsonify({"status": "alive", "scope": "webhook_process_only",
+                    "end_to_end_status": "unverified"})
 
 
 @app.route('/', methods=['GET'])
@@ -152,31 +141,5 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT, debug=False)
 
 
-def _setup_google_credentials():
-    """Записати Google credentials з env variables на диск якщо є."""
-    import json
-    base = Path(__file__).resolve().parent.parent.parent
-
-    google_token = os.environ.get('GOOGLE_TOKEN', '')
-    google_creds = os.environ.get('GOOGLE_CREDENTIALS', '')
-
-    if google_token:
-        try:
-            token_path = base / 'token.json'
-            token_path.write_text(google_token)
-            logger.info(f"✅ token.json записано ({len(google_token)} символів)")
-        except Exception as e:
-            logger.error(f"Помилка запису token.json: {e}")
-
-    if google_creds:
-        try:
-            creds_path = base / 'credentials.json'
-            creds_path.write_text(google_creds)
-            logger.info(f"✅ credentials.json записано ({len(google_creds)} символів)")
-        except Exception as e:
-            logger.error(f"Помилка запису credentials.json: {e}")
-
-
-# Налаштовуємо Google credentials при старті
-from pathlib import Path
-_setup_google_credentials()
+# Existing Google credentials are read in memory by integrations.google_auth.
+# Importing a webhook must not persist credentials to disk.

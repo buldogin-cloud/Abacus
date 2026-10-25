@@ -45,6 +45,7 @@ from modules.daily_briefing.checkpoints_util import CheckpointsReader, earliest_
 from modules.daily_briefing.checkpoints_writer import CheckpointsWriter  # noqa: E402
 from modules.daily_briefing.collector import CollectedData, collect_all  # noqa: E402
 from modules.daily_briefing.handoff import process_handoffs              # noqa: E402
+from modules.command_center.health import safe_auth_diagnostic
 from modules.daily_briefing.radar import process_radar                   # noqa: E402
 
 
@@ -470,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print("[✗] Canonical checkpoint unavailable; refusing an unverified fallback window")
         write_health_report(args.report, "failed", error_stage="checkpoint_read",
-                            error_type=type(exc).__name__)
+                            error_type=type(exc).__name__, **safe_auth_diagnostic(exc))
         return 1
 
     window_start = get_window_start(checkpoints)
@@ -481,9 +482,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         collected = collect_all(config, window_start)
     except Exception as exc:
-        print(f"[✗] Критична помилка Collector: {exc}")
+        print(f"[✗] Collector failed: {type(exc).__name__}")
         write_health_report(args.report, "failed", error_stage="collection",
-                            error_type=type(exc).__name__)
+                            error_type=type(exc).__name__, **safe_auth_diagnostic(exc))
         return 1
 
     print(f"[✓] Collector завершено: {collected.overall_status()}")
