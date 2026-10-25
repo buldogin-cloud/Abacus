@@ -1,0 +1,23 @@
+name: AI cost telemetry unit tests
+on:
+  pull_request:
+    paths:
+      - "modules/telemetry/**"
+      - "tests/test_cost_telemetry.py"
+      - "tests/test_provider_usage.py"
+      - ".github/workflows/ai-cost-telemetry-tests.yml"
+  workflow_dispatch:
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test telemetry with fixtures only
+        run: |
+          python -m unittest discover -s tests -p 'test_cost_telemetry.py' -v
+          python -m unittest discover -s tests -p 'test_provider_usage.py' -v
