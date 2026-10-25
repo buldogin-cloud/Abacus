@@ -235,6 +235,10 @@ def classify_handoff(
             return "needs_review"
         return "info_only"
 
+    # Research papers are evidence candidates, never automatic task updates.
+    if record.get("research_kind") in ("clinical", "research"):
+        return "needs_review"
+
     # Надійний збіг із реєстром → кандидат на оновлення.
     if registry_match and confident:
         return "update_existing"
@@ -359,6 +363,8 @@ def build_handoff(
 
 
 def _reason(record: dict, classification: str) -> str:
+    if record.get("research_kind") in ("clinical", "research"):
+        return "науковий матеріал — потрібна перевірка змісту та застосовності; не автоматичне завдання"
     reasons = {
         "new_task": "потенційна нова задача — потребує управлінського рішення Secretary",
         "update_existing": "можливе оновлення існуючої задачі — потребує зіставлення Secretary",
@@ -722,4 +728,5 @@ def process_handoffs(collected: CollectedData) -> dict[str, Any]:
         result["errors"].append(f"write/readback: {exc}")
 
     return result
+
 

@@ -48,6 +48,16 @@ researcher:
     - "протокол"
   # Скільки записів на джерело показувати.
   limit_per_source: 5
+  # JPAIC endpoint retained from the existing 2026-10-04 monitoring plan.
+  # Disabled until a live feed check and rollout are approved and verified.
+  # RSS covers the current feed snapshot, not the archive or guideline currency.
+  rss_sources:
+    - id: jpaic
+      label: "JPAIC — Pain, Anaesthesia & Intensive Care"
+      url: "https://jpaic.aaukr.org/gateway/plugin/WebFeedGatewayPlugin/rss2"
+      kind: clinical
+      keywords: []  # Do not discard clinical titles via normative-only keywords.
+      enabled: false
 
 # --- Надсилання брифінгу (необовʼязково) ---
 delivery:
@@ -55,3 +65,4 @@ delivery:
   send_email: false
   # Адреса отримувача брифінгу.
   email_to: "your.email@example.com"
+
