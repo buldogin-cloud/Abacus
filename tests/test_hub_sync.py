@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -541,7 +542,8 @@ class RunnerAndMappingTests(unittest.TestCase):
         )
 
     def test_private_mapping_uses_readback_stable_scalar_types(self) -> None:
-        records = source_records()[:-1]
+        records = [replace(r, anchor_sha256=f"anchor-{r.source_row}")
+                   for r in source_records()[:-1]]
         history = HubSyncPlanner(minimum_source_count=25).plan(records, []).appended_rows
         exclusion = ExcludedSourceRow(
             27,

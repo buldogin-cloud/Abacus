@@ -124,6 +124,42 @@ def load_private_bootstrap(rows: list[list[Any]]) -> PrivateBootstrap:
     return PrivateBootstrap(task_map, anchor_map, exclusions, runtime_config)
 
 
+def validate_mapping_accounting(
+    records: list[SourceRecord],
+    exclusions: list[ExcludedSourceRow],
+    *,
+    minimum_source_count: int = 26,
+) -> None:
+    """Validate all accounted rows before any write; capacity is not a count target."""
+    if type(minimum_source_count) is not int or minimum_source_count < 1:
+        raise SyncValidationError("minimum_source_count must be a positive integer")
+    if len(records) + len(exclusions) < minimum_source_count:
+        raise SyncValidationError(
+            f"Private mapping requires at least {minimum_source_count} source rows"
+        )
+    if len(records) + len(exclusions) > 199:
+        raise SyncValidationError("Private mapping capacity is 199 source rows (A2:L200)")
+    items = [*records, *exclusions]
+    rows = [item.source_row for item in items]
+    if any(type(row) is not int or row < 2 for row in rows):
+        raise SyncValidationError("Invalid source row number")
+    if len(rows) != len(set(rows)):
+        raise SyncValidationError("A source row is mapped and/or excluded more than once")
+    stable_ids = [record.stable_id for record in records]
+    if len(stable_ids) != len(set(stable_ids)):
+        raise SyncValidationError("Duplicate source stable ID")
+    task_ids = [item.source_task_id for item in items if item.source_task_id]
+    if len(task_ids) != len(set(task_ids)):
+        raise SyncValidationError("Duplicate source Task ID")
+    if any(not item.anchor_sha256.strip() for item in items):
+        raise SyncValidationError("Every source row needs an identity anchor")
+    anchors = [item.anchor_sha256 for item in items]
+    if len(anchors) != len(set(anchors)):
+        raise SyncValidationError("Duplicate source identity anchor")
+    if any(not item.reason.strip() for item in exclusions):
+        raise SyncValidationError("Excluded source row has no reason")
+
+
 def build_mapping_update(
     *,
     mapping_sheet: str,
@@ -131,10 +167,10 @@ def build_mapping_update(
     exclusions: list[ExcludedSourceRow],
     history_after: list[HistoryRow],
     seen_at: datetime | None = None,
+    minimum_source_count: int = 26,
 ) -> CellUpdate:
     """Build the minimal A:L projection after verified Hub readback."""
-    if len(records) + len(exclusions) != 26:
-        raise SyncValidationError("Private mapping must reconcile 26 source rows")
+    validate_mapping_accounting(records, exclusions, minimum_source_count=minimum_source_count)
     seen_at = seen_at or datetime.now(timezone.utc)
     seen_iso = seen_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
