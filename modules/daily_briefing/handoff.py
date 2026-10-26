@@ -241,6 +241,9 @@ def classify_handoff(
 
     # Надійний збіг із реєстром → кандидат на оновлення.
     if registry_match and confident:
+        task_id = registry_match.get("source_id", "")
+        if not task_id or str(task_id).startswith("task_row_"):
+            return "needs_review"
         return "update_existing"
 
     # Слабкий (ненадійний) збіг → хай вирішує Secretary, не нав'язуємо задачу.
@@ -299,7 +302,9 @@ def build_handoff(
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     source = record.get("source", "unknown")
     # Прив'язку до задачі показуємо лише за надійного збігу.
-    link_task = registry_match if (registry_match and confident) else None
+    link_task = registry_match if (registry_match and confident
+                                   and registry_match.get("source_id")
+                                   and not str(registry_match["source_id"]).startswith("task_row_")) else None
 
     return {
         # Мета
@@ -519,7 +524,7 @@ def _load_registry_tasks() -> list[dict]:
                 "task_name": t.get("Завдання / очікуваний результат") or t.get("Завдання") or t.get("Назва", ""),
                 "status": t.get("Статус", ""),
                 "deadline": t.get("Строк") or t.get("Термін", ""),
-                "source_id": f"task_row_{t.get('_row', 'unknown')}",
+                "source_id": t.get("Task ID", ""),
             }
             for t in open_tasks
         ]
@@ -728,5 +733,3 @@ def process_handoffs(collected: CollectedData) -> dict[str, Any]:
         result["errors"].append(f"write/readback: {exc}")
 
     return result
-
-

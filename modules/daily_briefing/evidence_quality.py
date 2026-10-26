@@ -59,4 +59,3 @@ def assess(record: dict) -> dict:
         "primary_source_url": url if official_link else "",
         "quality_policy_version": "1",
     }
-

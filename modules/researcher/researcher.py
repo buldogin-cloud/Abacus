@@ -453,4 +453,3 @@ if __name__ == "__main__":
                   "наказ", "оснащенн", "протокол", "госпіталіз"]
     )
     print(researcher.generate_digest())
-

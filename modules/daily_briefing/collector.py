@@ -642,5 +642,3 @@ def _log_source(result: SourceResult) -> None:
     count = len(result.records)
     err = f" | ПОМИЛКА: {result.error}" if result.error else ""
     print(f"  [{icon}] {result.source}: {result.status}, записів: {count}{err}")
-
-
