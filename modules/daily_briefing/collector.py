@@ -458,7 +458,8 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
 
     try:
         from modules.researcher.researcher import Researcher
-        researcher = Researcher(keywords=cfg.get("keywords", []))
+        researcher = Researcher(keywords=cfg.get("keywords", []),
+                                rss_sources=cfg.get("rss_sources", []))
         limit = cfg.get("limit_per_source", 5)
         # Новий інтерфейс: collect() повертає записи + статуси джерел.
         collected = researcher.collect(limit_per_source=limit)
@@ -466,6 +467,7 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
         blocked_sources = collected["blocked_sources"]
         errored_sources = collected["errored_sources"]
         all_items = collected["records"]
+        partial_sources = collected.get("partial_sources", [])
     except Exception as exc:
         return SourceResult(
             source="researcher",
@@ -501,8 +503,9 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
         # сторінки — НЕ першоджерела. Дзеркало aaukr — теж не офіційне джерело.
         # Тому на етапі фонового збору ЗАВЖДИ false; підтвердження робить
         # окремий крок обробки нормативних документів (handoff → radar).
+        source_code = item.get("source_code") or _primary_source(human_src)
         records.append({
-            "source": _primary_source(human_src),
+            "source": source_code,
             "source_id": item.get("url", "") or (f"norm:{order_no}|{doc_date}" if order_no else title),
             "detected_at": checked_at,
             "title": display_title,
@@ -512,9 +515,10 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
             "published_at": doc_date,
             "order_no": order_no,
             "doc_date": doc_date,
-            "document_type": "наказ" if order_no else "новина",
+            "document_type": "наказ" if order_no else "стаття" if item.get("research_kind") else "новина",
+            "research_kind": item.get("research_kind", ""),
             "change_status": "NEW",  # буде уточнено дедуплікатором
-            "primary_source": _primary_source(human_src),
+            "primary_source": source_code,
             "source_channel": item.get("via", ""),  # google_news / aaukr / rss
             "source_label": human_src,
             "source_verified": False,  # Req 2: ніколи true без перевірки офіц. джерела
@@ -523,14 +527,20 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
 
     # Чесний статус: якщо частина джерел заблокована/впала, це partial,
     # навіть коли резервні канали дали записи. Так Secretary бачить діру.
-    if blocked_sources or errored_sources:
+    if blocked_sources or errored_sources or partial_sources:
         status = "partial"
     else:
         status = "success"
 
     error_note = None
+    notices = []
     if blocked_sources:
-        error_note = "Заблоковано (Cloudflare): " + ", ".join(blocked_sources)
+        notices.append("Заблоковано: " + ", ".join(blocked_sources))
+    if errored_sources:
+        notices.append("Помилки джерел: " + ", ".join(errored_sources))
+    if partial_sources:
+        notices.append("Часткове охоплення: " + ", ".join(partial_sources))
+    error_note = "; ".join(notices) or None
 
     # connection_verified: хоча б одне джерело реально відповіло (ok/empty).
     any_reachable = any(st in ("ok", "empty") for st in source_status.values())
@@ -544,7 +554,7 @@ def collect_researcher(cfg: dict[str, Any], window_start: str) -> SourceResult:
         records=records,
         error=error_note,
         connection_verified=any_reachable,
-        meta={"source_status": source_status},
+        meta={"source_status": source_status, "source_meta": collected.get("source_meta", {})},
     )
     # Додаємо статуси джерел як метадані (для логів/дайджесту Secretary).
     result.source_status = source_status  # type: ignore[attr-defined]
@@ -632,4 +642,3 @@ def _log_source(result: SourceResult) -> None:
     count = len(result.records)
     err = f" | ПОМИЛКА: {result.error}" if result.error else ""
     print(f"  [{icon}] {result.source}: {result.status}, записів: {count}{err}")
-

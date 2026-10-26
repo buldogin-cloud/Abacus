@@ -30,6 +30,10 @@ def assess(record: dict) -> dict:
     if not record.get("source_id"):
         reasons.append("missing_source_id")
 
+    is_research = record.get("research_kind") in ("clinical", "research")
+    if is_research:
+        reasons.append("research_content_requires_review")
+
     is_normative = source in NORMATIVE_SOURCES
     official_link = parsed.scheme == "https" and host in TRUSTED_HOSTS
     verified = record.get("source_verified") is True
@@ -47,7 +51,7 @@ def assess(record: dict) -> dict:
     ) if is_normative else "source_recorded"
 
     # Prevent automated promotion of weak or unverified items.
-    needs_review = bool(reasons) or is_normative
+    needs_review = bool(reasons) or is_normative or is_research
     return {
         "evidence_status": evidence_status,
         "needs_human_review": needs_review,

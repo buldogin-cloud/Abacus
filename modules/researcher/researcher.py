@@ -74,7 +74,8 @@ _ORDER_NO_RE = re.compile(r"№\s?(\d+)")
 class Researcher:
     """Моніторинг оновлень МОЗ, НСЗУ та профільних наказів/новин."""
 
-    def __init__(self, keywords: list[str] | None = None) -> None:
+    def __init__(self, keywords: list[str] | None = None,
+                 rss_sources: list[dict[str, Any]] | None = None) -> None:
         """Ініціалізує Дослідника.
 
         :param keywords: ключові слова для фільтрації (напр. «анестезіолог»,
@@ -88,6 +89,46 @@ class Researcher:
         #   "error"     — мережева/парсинг-помилка
         #   "empty"     — контент отримано, але релевантних записів немає
         self.source_status: dict[str, str] = {}
+        self.source_meta: dict[str, dict[str, Any]] = {}
+        self.rss_sources = self._validate_rss_sources(rss_sources)
+
+    @staticmethod
+    def _validate_rss_sources(sources):
+        """Validate explicit configured feeds; never infer official status."""
+        if sources is None:
+            return []
+        if not isinstance(sources, list):
+            raise ValueError("rss_sources_must_be_list")
+        checked, ids, labels = [], set(), set()
+        reserved = {"Накази МОЗ (aaukr)", "МОЗ (новини)", "НСЗУ", "КМУ (постанови)"}
+        for source in sources:
+            if not isinstance(source, dict):
+                raise ValueError("invalid_rss_source")
+            if not isinstance(source.get("enabled", True), bool):
+                raise ValueError("rss_enabled_must_be_boolean")
+            if source.get("enabled", True) is False:
+                continue
+            source_id, label, url = (source.get(key, "") for key in ("id", "label", "url"))
+            if not all(isinstance(x, str) and x.strip() for x in (source_id, label, url)):
+                raise ValueError("rss_identity_required")
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("rss_https_url_required")
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", source_id):
+                raise ValueError("invalid_rss_id")
+            if source_id in ids or source_id in {"moz_ukraine", "nszu", "kmu_cabinet", "gmail", "calendar", "tasks_registry"} or label in labels or label in reserved:
+                raise ValueError("duplicate_rss_source")
+            kind = source.get("kind", "research")
+            if kind not in ("research", "clinical"):
+                raise ValueError("invalid_rss_kind")
+            keywords = source.get("keywords")
+            if keywords is not None and (not isinstance(keywords, list) or
+                                        not all(isinstance(k, str) for k in keywords)):
+                raise ValueError("invalid_rss_keywords")
+            ids.add(source_id)
+            labels.add(label)
+            checked.append(dict(source, id=source_id, label=label, url=url, kind=kind))
+        return checked
 
     # ------------------------------------------------------------------ #
     # Внутрішні допоміжні методи
@@ -279,28 +320,60 @@ class Researcher:
         )
 
     def search_rss(
-        self, feed_url: str, source: str, limit: int = 10
+        self, feed_url: str, source: str, limit: int = 10,
+        keywords: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Повертає записи з довільної RSS-стрічки за ключовими словами."""
-        feed = feedparser.parse(feed_url)
-        items = []
+        """Read a bounded feed snapshot, not a claim of complete history.
+
+        Empty means a valid feed with zero matching entries; HTTP/parse failures
+        are errors. No article body is fetched or clinically verified here.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("rss_positive_limit_required")
+        text, status = self._fetch(feed_url)
+        self.source_meta[source] = {"feed_url": feed_url, "coverage": "feed_snapshot"}
+        if status != "ok" or not text:
+            self.source_status[source] = status if status != "ok" else "error"
+            return []
+        try:
+            feed = feedparser.parse(text)
+        except Exception:
+            self.source_status[source] = "error"
+            return []
+        if feed.get("bozo") or not feed.get("version"):
+            self.source_status[source] = "error"
+            return []
+        selected = self.keywords if keywords is None else [k.lower() for k in keywords]
+        items, seen = [], set()
+        invalid = 0
         for entry in feed.entries:
-            title = getattr(entry, "title", "")
-            if not self._matches_keywords(title):
+            title = str(entry.get("title", "")).strip()
+            url = str(entry.get("link", "")).strip()
+            try:
+                parsed = urllib.parse.urlsplit(url)
+                valid_url = (parsed.scheme in ("http", "https") and parsed.hostname
+                             and not parsed.username and not parsed.password)
+            except ValueError:
+                valid_url = False
+            if not title or not valid_url:
+                invalid += 1
                 continue
-            items.append(
-                {
-                    "source": source,
-                    "title": title,
-                    "url": getattr(entry, "link", ""),
-                    "published": getattr(entry, "published", ""),
-                    "via": "rss",
-                }
-            )
-            if len(items) >= limit:
-                break
-        self.source_status[source] = "ok" if feed.entries else "empty"
-        return items
+            if selected and not any(k in title.lower() for k in selected):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            items.append({"source": source, "title": title, "url": url,
+                          "published": entry.get("published") or entry.get("updated", ""),
+                          "via": "rss"})
+        truncated = len(items) > limit
+        self.source_meta[source].update(entries_seen=len(feed.entries),
+                                        matching_entries=len(items), invalid_entries=invalid,
+                                        truncated=truncated)
+        self.source_status[source] = (
+            "partial" if truncated or invalid else "ok" if items else "empty"
+        )
+        return items[:limit]
 
     def collect(self, limit_per_source: int = 5) -> dict[str, Any]:
         """Збирає все та повертає структурований результат зі статусами.
@@ -308,10 +381,18 @@ class Researcher:
         Використовується оркестратором (collector.py) замість «сирого»
         дайджесту, щоб мати доступ до статусів джерел.
         """
+        self.source_status.clear()
+        self.source_meta.clear()
         moz = self.search_moz_updates(limit=limit_per_source)
         nszu = self.search_nszu_updates(limit=limit_per_source)
         kmu = self.search_kmu_updates(limit=limit_per_source)
         all_records = moz + nszu + kmu
+        for source in self.rss_sources:
+            rows = self.search_rss(source["url"], source["label"], limit_per_source,
+                                   keywords=source.get("keywords"))
+            for row in rows:
+                row.update(source_code=source["id"], research_kind=source["kind"])
+            all_records.extend(rows)
 
         blocked = [s for s, st in self.source_status.items() if st == "blocked"]
         errored = [s for s, st in self.source_status.items() if st == "error"]
@@ -322,14 +403,18 @@ class Researcher:
             "source_status": dict(self.source_status),
             "blocked_sources": blocked,
             "errored_sources": errored,
+            "partial_sources": [s for s, st in self.source_status.items() if st == "partial"],
+            "source_meta": dict(self.source_meta),
             "collected_at": datetime.now().isoformat(timespec="seconds"),
         }
 
     def generate_digest(self, limit_per_source: int = 5) -> str:
         """Формує короткий дайджест оновлень у markdown-форматі."""
-        moz = self.search_moz_updates(limit=limit_per_source)
-        nszu = self.search_nszu_updates(limit=limit_per_source)
-        kmu = self.search_kmu_updates(limit=limit_per_source)
+        collected = self.collect(limit_per_source)
+        rows = collected["records"]
+        moz = [r for r in rows if r["source"] in ("Накази МОЗ (aaukr)", "МОЗ (новини)")]
+        nszu = [r for r in rows if r["source"] == "НСЗУ"]
+        kmu = [r for r in rows if r["source"] == "КМУ (постанови)"]
 
         lines = [f"# 📰 Дайджест Дослідника — {datetime.now():%d.%m.%Y}", ""]
 
@@ -348,10 +433,12 @@ class Researcher:
         _section("Накази та оновлення МОЗ", moz)
         _section("Постанови КМУ (Урядовий портал)", kmu)
         _section("НСЗУ", nszu)
+        for source in self.rss_sources:
+            _section(source["label"], [r for r in rows if r.get("source_code") == source["id"]])
 
         # Блок статусів джерел — щоб блокування було видно, а не приховане.
         lines.append("## Статус джерел")
-        status_icon = {"ok": "✅", "blocked": "🚫 (Cloudflare)", "error": "⚠️", "empty": "➖"}
+        status_icon = {"ok": "✅", "blocked": "🚫 (Cloudflare)", "error": "⚠️", "empty": "➖", "partial": "⚠️ (часткове охоплення)"}
         for src, st in self.source_status.items():
             lines.append(f"- {src}: {status_icon.get(st, st)}")
         lines.append("")

@@ -37,10 +37,11 @@ COL_ASSIGNEE = "Виконавець / підрозділ"
 COL_DEADLINE = "Строк"
 COL_STATUS = "Статус"
 COL_PROOF = "Остання відповідь / доказ"
+COL_TASK_ID = "Task ID"
 
-# Назва аркуша та діапазон за замовчуванням (10 колонок A:J).
+# Назва аркуша та діапазон за замовчуванням (підмножина A:O, включно зі стабільним Task ID).
 DEFAULT_SHEET = "Реєстр"
-DEFAULT_RANGE_COLS = "A1:J1000"
+DEFAULT_RANGE_COLS = "A1:O1000"
 
 # Індекс колонки «Статус» для оновлення (I = 9-та колонка).
 STATUS_COLUMN_LETTER = "I"
@@ -93,6 +94,7 @@ def _normalize(record: dict[str, str]) -> dict[str, str]:
         "Документ": record.get(COL_DOC, "").strip(),
         "Доказ": record.get(COL_PROOF, "").strip(),
         "_row": record.get("_row"),
+        "Task ID": record.get(COL_TASK_ID, "").strip(),
     }
 
 
