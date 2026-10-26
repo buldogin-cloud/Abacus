@@ -25,6 +25,7 @@ from modules.hub_sync.mapping_store import (
     build_verified_log_update,
     load_private_bootstrap,
     validate_sync_log,
+    validate_mapping_accounting,
 )
 from modules.hub_sync.planner import HubSyncPlanner, SyncValidationError, parse_current
 
@@ -45,6 +46,21 @@ def column_index(label: str) -> int:
     for char in label:
         result = result * 26 + (ord(char) - ord("A") + 1)
     return result - 1
+
+
+def complete_source_range(sheet: str, configured_range: str) -> str:
+    """Read all source rows in the configured columns, never a truncated count."""
+    match = re.fullmatch(r"(?:(?P<sheet>.+)!)?A1:(?P<end>[A-Z]+)(?:[1-9][0-9]*)?",
+                         configured_range.strip())
+    if not match:
+        raise SyncValidationError("Source range must start at A1 with complete columns")
+    configured_sheet = match.group("sheet")
+    quoted_sheet = "'" + sheet.replace("'", "''") + "'"
+    if configured_sheet not in (None, sheet, quoted_sheet):
+        raise SyncValidationError("Source range targets a different sheet")
+    if column_index(match.group("end")) < 14:
+        raise SyncValidationError("Source range omits Task ID column O")
+    return f"{quoted_sheet}!A1:{match.group('end')}"
 
 
 def qualify_guard_range(sheet: str, configured_range: str) -> str:
@@ -295,10 +311,11 @@ def main(argv: list[str] | None = None) -> int:
         if config.source_sheet not in source_sheet_ids:
             raise SyncValidationError("Secretary source sheet ID is unavailable")
         source_sheet_id = source_sheet_ids[config.source_sheet]
+        source_range = complete_source_range(config.source_sheet, config.source_range)
         stage = "secretary_snapshot_first"
-        first_source = source_client.read_range(config.source_range)
+        first_source = source_client.read_range(source_range)
         stage = "secretary_snapshot_second"
-        second_source = source_client.read_range(config.source_range)
+        second_source = source_client.read_range(source_range)
         if first_source != second_source:
             raise SyncValidationError("Secretary range changed between preflight reads")
 
@@ -319,6 +336,9 @@ def main(argv: list[str] | None = None) -> int:
             history_range,
             config.history_first_row,
         )
+        validate_mapping_accounting(
+            records, exclusions, minimum_source_count=config.minimum_source_count,
+        )
         planner = HubSyncPlanner(
             history_sheet=config.history_sheet,
             first_history_row=config.history_first_row,
@@ -337,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Lock/re-read precondition: source and history must still produce the
         # exact same plan immediately before the atomic write.
-        source_prewrite = source_client.read_range(config.source_range)
+        source_prewrite = source_client.read_range(source_range)
         history_prewrite = read_history(
             hub_client,
             history_range,
@@ -368,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 planner.verify_readback(records, uncertain_history, plan)
 
-        source_after = source_client.read_range(config.source_range)
+        source_after = source_client.read_range(source_range)
         if source_after != first_source:
             raise SyncValidationError(
                 "Secretary source changed during sync; no checkpoint may advance"
@@ -388,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
             records=records,
             exclusions=exclusions,
             history_after=history_after,
+            minimum_source_count=config.minimum_source_count,
         )
         assert_sync_write_boundary(
             [mapping_update],

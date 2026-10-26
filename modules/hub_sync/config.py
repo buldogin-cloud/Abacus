@@ -125,7 +125,7 @@ class HubSyncConfig:
             mapping_sheet=raw.get("mapping_sheet", "98 — SECRETARY SYNC"),
             history_first_row=int(raw.get("history_first_row", 6)),
             history_last_row=int(raw.get("history_last_row", 305)),
-            minimum_source_count=int(raw.get("minimum_source_count", 26)),
+            minimum_source_count=raw.get("minimum_source_count", 26),
             task_id_column=int(raw["task_id_column"]),
             status_column=int(raw["status_column"]),
             identity_columns=tuple(int(value) for value in raw["identity_columns"]),
@@ -227,8 +227,9 @@ class HubSyncConfig:
                 )
         if self.task_id_column != 14:
             raise ConfigError("Verified Secretary Task ID column must be O (zero-based 14)")
-        if self.minimum_source_count != 26:
-            raise ConfigError("Verified first-run source count must be 26")
+        if (type(self.minimum_source_count) is not int
+                or self.minimum_source_count < 1):
+            raise ConfigError("minimum_source_count must be a positive integer")
         if self.history_first_row < 1 or self.history_last_row < self.history_first_row:
             raise ConfigError("Invalid history bounds")
         try:
